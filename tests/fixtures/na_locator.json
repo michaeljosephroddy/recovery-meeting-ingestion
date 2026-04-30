@@ -1,0 +1,36 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "description": "Eastern Area (Dublin)",
+      "phone": "+353 86.8629308",
+      "phone2": "",
+      "whatsapp": "",
+      "website": "https://www.na-ireland.org/na-meetings/east/",
+      "country": "Ireland",
+      "state": "",
+      "city": "",
+      "postal_code": "",
+      "type": "Area",
+      "phonewebid": "",
+      "groupcode": "IR001"
+    },
+    {
+      "description": "Seaway Trail Area",
+      "phone": "+1 833.436-6166",
+      "phone2": "",
+      "whatsapp": "",
+      "website": "",
+      "country": "United States",
+      "state": "New York",
+      "city": "",
+      "postal_code": "",
+      "type": "area",
+      "phonewebid": "",
+      "groupcode": "AR00503"
+    }
+  ],
+  "ll_us": [{"state": "New York", "count": 37}],
+  "ll_ca": [{"state": "Ontario", "count": 12}],
+  "ll_intl": [{"country": "Ireland", "count": 3}]
+}

@@ -1,0 +1,2 @@
+"""Recovery meeting ingestion service."""
+
