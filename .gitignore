@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+.env
+.env.*
+!.env.example
+snapshots/
+playwright-report/
+test-results/

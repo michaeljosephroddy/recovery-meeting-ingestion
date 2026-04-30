@@ -1,0 +1,27 @@
+[
+  {
+    "name": "Daily Reflection",
+    "slug": "daily-reflection-monday",
+    "day": 1,
+    "time": "19:30",
+    "end_time": "20:30",
+    "timezone": "Europe/Dublin",
+    "location": "Community Centre",
+    "address": "1 Main Street",
+    "city": "Dublin",
+    "country": "IE",
+    "types": ["Open", "Discussion"],
+    "updated": "2026-04-30T10:00:00Z"
+  },
+  {
+    "name": "Online Big Book",
+    "slug": "online-big-book",
+    "day": 3,
+    "time": "20:00",
+    "timezone": "Europe/Dublin",
+    "conference_url": "https://zoom.example.org/j/123456789",
+    "types": ["Online", "Big Book"],
+    "updated": "2026-04-30T10:00:00Z"
+  }
+]
+

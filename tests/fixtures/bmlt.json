@@ -1,0 +1,18 @@
+[
+  {
+    "id_bigint": "1001",
+    "meeting_name": "Hope Group",
+    "weekday_tinyint": "2",
+    "start_time": "18:00:00",
+    "time_zone": "Europe/Dublin",
+    "location_text": "Parish Hall",
+    "formatted_address": "2 Main Road",
+    "location_municipality": "Cork",
+    "location_province": "County Cork",
+    "location_nation": "IE",
+    "latitude": "51.8985",
+    "longitude": "-8.4756",
+    "formats": "O,D"
+  }
+]
+
