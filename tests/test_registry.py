@@ -28,3 +28,30 @@ def test_source_from_candidate_has_stable_id_and_normalized_url() -> None:
     assert source.name == "Example Intergroup"
     assert source.normalized_url == "https://example.org/meetings?a=1&b=2"
 
+
+def test_source_from_candidate_infers_timezone_from_region() -> None:
+    source = source_from_candidate(
+        SourceCandidate(
+            fellowship="ca",
+            label="Arizona",
+            url="https://caarizona.example/",
+            country="United States",
+            region="Arizona",
+        )
+    )
+
+    assert source.config["timezone"] == "America/Phoenix"
+
+
+def test_source_from_candidate_infers_region_and_timezone_from_label() -> None:
+    source = source_from_candidate(
+        SourceCandidate(
+            fellowship="ca",
+            label="California - Northern",
+            url="https://canorcal.example/",
+            country="United States",
+        )
+    )
+
+    assert source.region == "California"
+    assert source.config["timezone"] == "America/Los_Angeles"

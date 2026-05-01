@@ -74,3 +74,29 @@ def test_ingest_source_dry_run_uses_bmlt_fixture() -> None:
     assert result.exit_code == 0
     assert "records_fetched: 1" in result.output
     assert "candidates_normalized: 1" in result.output
+
+
+def test_scrape_source_dry_run_uses_html_fixture(tmp_path) -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "scrape-source",
+            "--source-id",
+            "aa-browser",
+            "--fixture",
+            str(FIXTURES / "static_meetings.html"),
+            "--source-url",
+            "https://example.org/meetings",
+            "--output-dir",
+            str(tmp_path / "artifacts"),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "scrape_status: succeeded" in result.output
+    assert "pages_visited: 1" in result.output
+    assert "records_extracted: 1" in result.output
+    assert "candidates_normalized: 1" in result.output
+    assert "artifact_dir:" in result.output

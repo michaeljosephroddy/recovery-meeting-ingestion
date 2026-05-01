@@ -1,11 +1,14 @@
+import httpx
+
 from app.config import Settings
-from app.sources.aa_world_services import AaWorldServicesDiscovery
+from app.sources.aa_world_services import AaWorldServicesDiscovery, aa_filter_queries_from_html
 from app.sources.ca_world_services import CA_WORLD_URL, CaWorldServicesDiscovery
 from app.sources.na_world_services import (
     NA_WORLD_URL,
     NaWorldServicesDiscovery,
     parse_location_index,
 )
+from app.sources.registry import SourceType
 
 from .conftest import FIXTURES
 
@@ -20,6 +23,67 @@ def test_aa_world_fixture_produces_source_candidates_not_meetings() -> None:
     assert any(str(candidate.url) == "tel:9096284428" for candidate in candidates)
     assert any(candidate.country == "Ireland" for candidate in candidates)
     assert all(not hasattr(candidate, "occurrences") for candidate in candidates)
+
+
+def test_aa_world_filter_options_produce_query_queue() -> None:
+    html = """
+    <select name="state">
+      <option value="All">- Any -</option>
+      <option value="CA">California</option>
+    </select>
+    <select name="state">
+      <option value="ON">Ontario</option>
+    </select>
+    <select name="cc">
+      <option value="IE">Ireland</option>
+    </select>
+    """
+
+    assert aa_filter_queries_from_html(html) == [
+        ("state", "CA"),
+        ("state", "ON"),
+        ("cc", "IE"),
+    ]
+
+
+async def test_aa_discover_walks_filter_query_pages() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("state") == "CA":
+            return httpx.Response(
+                200,
+                text="""
+                <div class="view-locations-listing">
+                  <div class="area-loc-item">
+                    <h3>California AA</h3>
+                    <address><span class="administrative-area">California</span></address>
+                    <a href="https://local-aa.example/">Website</a>
+                  </div>
+                </div>
+                """,
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            text="""
+            <select name="state">
+              <option value="All">- Any -</option>
+              <option value="CA">California</option>
+            </select>
+            <select name="cc">
+              <option value="IE">Ireland</option>
+            </select>
+            """,
+            request=request,
+        )
+
+    discovery = AaWorldServicesDiscovery(
+        Settings(default_rate_limit_seconds=0),
+        transport=httpx.MockTransport(handler),
+    )
+
+    candidates = await discovery.discover(max_locations=1)
+
+    assert any(str(candidate.url) == "https://local-aa.example/" for candidate in candidates)
 
 
 def test_ca_world_fixture_produces_ca_source_candidates() -> None:
@@ -42,6 +106,116 @@ def test_ca_country_fixture_produces_local_source_candidates() -> None:
     assert candidates[0].fellowship == "ca"
     assert str(candidates[0].url) == "https://www.caireland.live"
     assert candidates[0].country == "Ireland"
+
+
+async def test_ca_discover_stops_at_external_local_site_boundary() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/meetings/":
+            return httpx.Response(
+                200,
+                text='<a href="https://ca.org/meetings/online-meetings/">Online</a>',
+                request=request,
+            )
+        if request.url.path == "/meetings/online-meetings/":
+            return httpx.Response(
+                302,
+                headers={"location": "https://local-ca.example/"},
+                request=request,
+            )
+        if request.url.host == "local-ca.example":
+            return httpx.Response(
+                200,
+                text="""
+                <a href="https://local-ca.example/events/">Events</a>
+                <a href="https://apps.apple.com/app/example">App Store</a>
+                """,
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    discovery = CaWorldServicesDiscovery(
+        Settings(default_rate_limit_seconds=0),
+        transport=httpx.MockTransport(handler),
+    )
+
+    candidates = await discovery.discover(max_locations=2)
+
+    urls = {str(candidate.url) for candidate in candidates}
+    assert "https://local-ca.example/" in urls
+    assert "https://local-ca.example/events/" not in urls
+    assert "https://apps.apple.com/app/example" not in urls
+
+
+async def test_ca_discover_preserves_listing_region_after_external_redirect() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/meetings/":
+            return httpx.Response(
+                200,
+                text='<a href="https://ca.org/meetings/united-states/arizona/">Arizona</a>',
+                request=request,
+            )
+        if request.url.path == "/meetings/united-states/arizona/":
+            return httpx.Response(
+                302,
+                headers={"location": "https://caarizona.example/"},
+                request=request,
+            )
+        if request.url.host == "caarizona.example":
+            return httpx.Response(200, text="<html></html>", request=request)
+        return httpx.Response(404, request=request)
+
+    discovery = CaWorldServicesDiscovery(
+        Settings(default_rate_limit_seconds=0),
+        transport=httpx.MockTransport(handler),
+    )
+
+    candidates = await discovery.discover(max_locations=2)
+    local = next(candidate for candidate in candidates if str(candidate.url) == "https://caarizona.example/")
+
+    assert local.country == "United States"
+    assert local.region == "Arizona"
+
+
+async def test_ca_discover_follows_nested_world_listing_pages() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/meetings/":
+            return httpx.Response(
+                200,
+                text="""
+                <a href="https://ca.org/meetings/united-states/">United States</a>
+                """,
+                request=request,
+            )
+        if request.url.path == "/meetings/united-states/":
+            return httpx.Response(
+                200,
+                text="""
+                <a href="https://ca.org/meetings/united-states/california/">California</a>
+                """,
+                request=request,
+            )
+        if request.url.path == "/meetings/united-states/california/":
+            return httpx.Response(
+                200,
+                text="""
+                <a href="https://example-ca.org/meetings">Example CA Area</a>
+                """,
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    discovery = CaWorldServicesDiscovery(
+        Settings(default_rate_limit_seconds=0),
+        transport=httpx.MockTransport(handler),
+    )
+
+    candidates = await discovery.discover(max_locations=3)
+
+    assert any(str(candidate.url) == "https://example-ca.org/meetings" for candidate in candidates)
+    local = next(candidate for candidate in candidates if str(candidate.url).startswith("https://example-ca.org"))
+    assert local.source_type == SourceType.LOCAL_SERVICE_BODY
+    assert local.country == "United States"
+    assert local.region == "California"
 
 
 def test_na_world_fixture_produces_na_source_candidates() -> None:

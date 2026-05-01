@@ -12,6 +12,11 @@ from app.ingest import IngestResult
 from app.ingest import ingest_source as run_ingest_source
 from app.logging import configure_logging
 from app.review.flags import flag_source_drop
+from app.scraping.evidence import write_scrape_evidence
+from app.scraping.extract_meetings import extract_meetings_from_html
+from app.scraping.models import CrawlSettings, ScrapedPage, ScrapeSourceResult
+from app.scraping.service import ScrapeResult
+from app.scraping.service import scrape_source as run_scrape_source
 from app.sources.aa_world_services import AaWorldServicesDiscovery
 from app.sources.ca_world_services import CaWorldServicesDiscovery
 from app.sources.na_world_services import NaWorldServicesDiscovery
@@ -137,6 +142,7 @@ def ingest_source(
         typer.Option(help="Source URL for fixture ingestion."),
     ] = "https://example.org/meetings.json",
 ) -> None:
+    console.print("deprecated: ingest-source is kept as a transition alias; prefer scrape-source")
     settings = get_settings()
     source = _source_for_ingest(source_id, settings, fixture, adapter, fellowship, source_url)
     result = asyncio.run(run_ingest_source(source, settings, fixture=fixture))
@@ -156,6 +162,7 @@ def ingest_source(
 
 @app.command("ingest-all")
 def ingest_all(dry_run: bool = True) -> None:
+    console.print("deprecated: ingest-all is kept as a transition alias; prefer scrape-all")
     settings = get_settings()
     with connect(settings) as connection:
         sources = SourceRepository(connection).list_sources()
@@ -181,6 +188,188 @@ def ingest_all(dry_run: bool = True) -> None:
                 )
         except Exception as exc:
             console.print(f"- {source.id} failed: {exc}")
+
+
+@app.command("scrape-source")
+def scrape_source(
+    source_id: Annotated[str, typer.Option(help="Source registry ID to scrape.")],
+    dry_run: bool = True,
+    fixture: Annotated[
+        Path | None,
+        typer.Option(help="Read saved rendered HTML instead of launching Playwright."),
+    ] = None,
+    adapter: Annotated[
+        AdapterType,
+        typer.Option(help="Adapter to use when scraping from a fixture without the DB."),
+    ] = AdapterType.PLAYWRIGHT_BROWSER,
+    fellowship: Annotated[
+        str,
+        typer.Option(help="Fellowship slug for fixture scraping."),
+    ] = "aa",
+    source_url: Annotated[
+        str,
+        typer.Option(help="Source URL for fixture scraping."),
+    ] = "https://example.org/",
+    max_pages: Annotated[int, typer.Option(help="Maximum pages to visit.")] = 20,
+    max_depth: Annotated[int, typer.Option(help="Maximum link depth to crawl.")] = 2,
+    save_artifacts: Annotated[
+        bool,
+        typer.Option(help="Write rendered HTML, JSON traces, and summaries."),
+    ] = True,
+    output_dir: Annotated[
+        Path,
+        typer.Option(help="Directory for scrape artifacts."),
+    ] = Path("scrape_artifacts"),
+    headful: Annotated[
+        bool,
+        typer.Option(help="Run Chromium visibly instead of headless."),
+    ] = False,
+) -> None:
+    settings = get_settings()
+    source = _source_for_scrape(source_id, settings, fixture, adapter, fellowship, source_url)
+    result = asyncio.run(
+        _scrape_source(
+            source,
+            settings,
+            fixture=fixture,
+            crawl_settings=CrawlSettings(
+                max_pages_per_source=max_pages,
+                max_depth=max_depth,
+                save_artifacts=save_artifacts,
+                headless=not headful,
+            ),
+            output_dir=output_dir if save_artifacts else None,
+        )
+    )
+    _print_scrape_result("Scrape source", dry_run, source, result)
+    if dry_run:
+        console.print("output: not written because --dry-run was set")
+        return
+    persisted = _persist_ingest_result(settings, source, result.ingest)
+    _print_persisted_result(persisted)
+
+
+@app.command("scrape-all")
+def scrape_all(
+    dry_run: bool = True,
+    fellowship: Annotated[
+        str | None,
+        typer.Option(help="Only scrape sources for this fellowship."),
+    ] = None,
+    limit: Annotated[int | None, typer.Option(help="Maximum sources to scrape.")] = None,
+    max_pages_per_source: Annotated[
+        int,
+        typer.Option(help="Maximum pages to visit per source."),
+    ] = 20,
+    only_unknown: Annotated[
+        bool,
+        typer.Option(help="Only scrape sources without a configured ingest adapter."),
+    ] = False,
+    include_failed: Annotated[
+        bool,
+        typer.Option(help="Also retry sources with previous scrape failure metadata."),
+    ] = False,
+    save_artifacts: Annotated[
+        bool,
+        typer.Option(help="Write scrape artifacts for each source."),
+    ] = True,
+    output_dir: Annotated[
+        Path,
+        typer.Option(help="Directory for scrape artifacts."),
+    ] = Path("scrape_artifacts"),
+    headful: Annotated[
+        bool,
+        typer.Option(help="Run Chromium visibly instead of headless."),
+    ] = False,
+) -> None:
+    settings = get_settings()
+    with connect(settings) as connection:
+        sources = SourceRepository(connection).list_sources(fellowship=fellowship)
+    if only_unknown:
+        sources = [source for source in sources if source.adapter_type == AdapterType.UNKNOWN]
+    if not include_failed:
+        sources = [source for source in sources if not _source_last_scrape_failed(source)]
+    scrapeable = [
+        _as_browser_scrape_source(source)
+        for source in sources
+        if _is_scrapeable_source(source)
+    ]
+    if limit is not None:
+        scrapeable = scrapeable[:limit]
+
+    console.print(f"Scrape all dry_run={dry_run}")
+    console.print(f"sources: {len(scrapeable)}")
+    crawl_settings = CrawlSettings(
+        max_pages_per_source=max_pages_per_source,
+        save_artifacts=save_artifacts,
+        headless=not headful,
+    )
+    for source in scrapeable:
+        try:
+            result = asyncio.run(
+                _scrape_source(
+                    source,
+                    settings,
+                    fixture=None,
+                    crawl_settings=crawl_settings,
+                    output_dir=output_dir if save_artifacts else None,
+                )
+            )
+            _print_scrape_result(f"- {source.id}", dry_run, source, result)
+            if not dry_run:
+                persisted = _persist_ingest_result(settings, source, result.ingest)
+                console.print(
+                    f"  stored={persisted['raw_records_stored']} "
+                    f"canonical={persisted['canonical_meetings_upserted']} "
+                    f"run={persisted['import_run_id']}"
+                )
+        except Exception as exc:
+            console.print(f"- {source.id} failed: {exc}")
+
+
+@app.command("debug-scrape-source")
+def debug_scrape_source(
+    source_id: Annotated[str, typer.Option(help="Source registry ID to debug scrape.")],
+    output_dir: Annotated[
+        Path,
+        typer.Option(help="Directory for debug scrape artifacts."),
+    ] = Path("scrape_artifacts/debug"),
+    fixture: Annotated[
+        Path | None,
+        typer.Option(help="Read saved rendered HTML instead of launching Playwright."),
+    ] = None,
+    adapter: Annotated[
+        AdapterType,
+        typer.Option(help="Adapter to use when debugging from a fixture without the DB."),
+    ] = AdapterType.PLAYWRIGHT_BROWSER,
+    fellowship: Annotated[str, typer.Option(help="Fellowship slug for fixture scraping.")] = "aa",
+    source_url: Annotated[str, typer.Option(help="Source URL for fixture scraping.")] = (
+        "https://example.org/"
+    ),
+    max_pages: Annotated[int, typer.Option(help="Maximum pages to visit.")] = 20,
+    max_depth: Annotated[int, typer.Option(help="Maximum link depth to crawl.")] = 2,
+    headful: Annotated[
+        bool,
+        typer.Option(help="Run Chromium visibly instead of headless."),
+    ] = False,
+) -> None:
+    settings = get_settings()
+    source = _source_for_scrape(source_id, settings, fixture, adapter, fellowship, source_url)
+    result = asyncio.run(
+        _scrape_source(
+            source,
+            settings,
+            fixture=fixture,
+            crawl_settings=CrawlSettings(
+                max_pages_per_source=max_pages,
+                max_depth=max_depth,
+                save_artifacts=True,
+                headless=not headful,
+            ),
+            output_dir=output_dir,
+        )
+    )
+    _print_scrape_result("Debug scrape source", True, source, result)
 
 
 @app.command("classify-sources")
@@ -387,6 +576,147 @@ def _source_for_ingest(
     if source is None:
         raise typer.BadParameter(f"source not found: {source_id}")
     return source
+
+
+def _source_for_scrape(
+    source_id: str,
+    settings: Settings,
+    fixture: Path | None,
+    adapter: AdapterType,
+    fellowship: str,
+    source_url: str,
+) -> Source:
+    if fixture is not None:
+        return Source(
+            id=source_id,
+            fellowship=fellowship,  # type: ignore[arg-type]
+            name=source_id,
+            url=source_url,
+            source_type=SourceType.LOCAL_SERVICE_BODY,
+            adapter_type=adapter,
+            requires_browser=adapter == AdapterType.PLAYWRIGHT_BROWSER,
+        )
+
+    with connect(settings) as connection:
+        source = SourceRepository(connection).get_source(source_id)
+    if source is None:
+        raise typer.BadParameter(f"source not found: {source_id}")
+    return _as_browser_scrape_source(source)
+
+
+async def _scrape_source(
+    source: Source,
+    settings: Settings,
+    *,
+    fixture: Path | None,
+    crawl_settings: CrawlSettings,
+    output_dir: Path | None,
+) -> ScrapeResult:
+    if fixture is None:
+        return await run_scrape_source(
+            source,
+            settings,
+            crawl_settings=crawl_settings,
+            artifact_dir=output_dir,
+        )
+    html = fixture.read_text(encoding="utf-8")
+    extracted = extract_meetings_from_html(
+        html,
+        source_page_url=source.url,
+        source_config=source.config,
+    )
+    scrape = ScrapeSourceResult(
+        source_id=source.id,
+        source_url=source.url,
+        status="succeeded",
+        pages=[
+            ScrapedPage(
+                url=source.url,
+                final_url=source.url,
+                title=fixture.name,
+                html=html,
+                extracted=extracted,
+            )
+        ],
+    )
+    if output_dir is not None and crawl_settings.save_artifacts:
+        artifact_path = write_scrape_evidence(scrape, output_dir)
+        scrape = ScrapeSourceResult(
+            source_id=scrape.source_id,
+            source_url=scrape.source_url,
+            status=scrape.status,
+            pages=scrape.pages,
+            artifact_dir=str(artifact_path),
+        )
+    ingest_result = await run_ingest_source(source, settings, fixture=fixture)
+    return ScrapeResult(scrape=scrape, ingest=ingest_result)
+
+
+def _as_browser_scrape_source(source: Source) -> Source:
+    if source.adapter_type in {
+        AdapterType.PLAYWRIGHT_BROWSER,
+        AdapterType.STATIC_HTML,
+        AdapterType.FORM_HTTP,
+    }:
+        config = source.config
+    else:
+        existing_scrape = source.config.get("scrape")
+        scrape_config = existing_scrape if isinstance(existing_scrape, dict) else {}
+        config = {
+            **source.config,
+            "scrape": {
+                **scrape_config,
+                "previous_adapter_type": source.adapter_type.value,
+            },
+        }
+    return source.model_copy(
+        update={
+            "source_type": SourceType.LOCAL_SERVICE_BODY,
+            "adapter_type": AdapterType.PLAYWRIGHT_BROWSER,
+            "requires_browser": True,
+            "config": config,
+        }
+    )
+
+
+def _is_scrapeable_source(source: Source) -> bool:
+    return (
+        source.source_type
+        not in {
+            SourceType.PHONE,
+            SourceType.PDF,
+            SourceType.WORLD_SERVICE_LISTING,
+        }
+        and not source.url.startswith("tel:")
+    )
+
+
+def _source_last_scrape_failed(source: Source) -> bool:
+    scrape_config = source.config.get("scrape")
+    if not isinstance(scrape_config, dict):
+        return False
+    return scrape_config.get("last_status") == "failed"
+
+
+def _print_scrape_result(
+    label: str,
+    dry_run: bool,
+    source: Source,
+    result: ScrapeResult,
+) -> None:
+    console.print(f"{label} dry_run={dry_run}")
+    console.print(f"source_id: {source.id}")
+    console.print(f"adapter: {source.adapter_type}")
+    console.print(f"scrape_status: {result.scrape.status}")
+    console.print(f"pages_visited: {result.scrape.pages_visited}")
+    console.print(f"records_extracted: {result.scrape.records_extracted}")
+    console.print(f"records_fetched: {len(result.ingest.raw_records)}")
+    console.print(f"candidates_normalized: {len(result.ingest.candidates)}")
+    console.print(f"review_flags: {len(result.ingest.review_flags)}")
+    if result.scrape.artifact_dir:
+        console.print(f"artifact_dir: {result.scrape.artifact_dir}")
+    if result.scrape.error_message:
+        console.print(f"error: {result.scrape.error_message}")
 
 
 def _persist_ingest_result(

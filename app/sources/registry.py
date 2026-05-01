@@ -30,6 +30,73 @@ class AdapterType(StrEnum):
 
 PermissionStatus = Literal["unknown", "allowed", "denied", "manual_review"]
 
+US_REGION_TIMEZONES = {
+    "Alabama": "America/Chicago",
+    "Alaska": "America/Anchorage",
+    "Arizona": "America/Phoenix",
+    "Arkansas": "America/Chicago",
+    "California": "America/Los_Angeles",
+    "Colorado": "America/Denver",
+    "Connecticut": "America/New_York",
+    "Delaware": "America/New_York",
+    "District Of Columbia": "America/New_York",
+    "Florida": "America/New_York",
+    "Georgia": "America/New_York",
+    "Hawaii": "Pacific/Honolulu",
+    "Idaho": "America/Boise",
+    "Illinois": "America/Chicago",
+    "Indiana": "America/Indiana/Indianapolis",
+    "Iowa": "America/Chicago",
+    "Kansas": "America/Chicago",
+    "Kentucky": "America/New_York",
+    "Louisiana": "America/Chicago",
+    "Maine": "America/New_York",
+    "Maryland": "America/New_York",
+    "Massachusetts": "America/New_York",
+    "Michigan": "America/Detroit",
+    "Minnesota": "America/Chicago",
+    "Mississippi": "America/Chicago",
+    "Missouri": "America/Chicago",
+    "Montana": "America/Denver",
+    "Nebraska": "America/Chicago",
+    "Nevada": "America/Los_Angeles",
+    "New Hampshire": "America/New_York",
+    "New Jersey": "America/New_York",
+    "New Mexico": "America/Denver",
+    "New York": "America/New_York",
+    "North Carolina": "America/New_York",
+    "North Dakota": "America/Chicago",
+    "Ohio": "America/New_York",
+    "Oklahoma": "America/Chicago",
+    "Oregon": "America/Los_Angeles",
+    "Pennsylvania": "America/New_York",
+    "Rhode Island": "America/New_York",
+    "South Carolina": "America/New_York",
+    "South Dakota": "America/Chicago",
+    "Tennessee": "America/Chicago",
+    "Texas": "America/Chicago",
+    "Utah": "America/Denver",
+    "Vermont": "America/New_York",
+    "Virginia": "America/New_York",
+    "Washington": "America/Los_Angeles",
+    "West Virginia": "America/New_York",
+    "Wisconsin": "America/Chicago",
+    "Wyoming": "America/Denver",
+}
+
+CANADA_REGION_TIMEZONES = {
+    "Alberta": "America/Edmonton",
+    "British Columbia": "America/Vancouver",
+    "Manitoba": "America/Winnipeg",
+    "New Brunswick": "America/Moncton",
+    "Newfoundland And Labrador": "America/St_Johns",
+    "Nova Scotia": "America/Halifax",
+    "Ontario": "America/Toronto",
+    "Prince Edward Island": "America/Halifax",
+    "Quebec": "America/Toronto",
+    "Saskatchewan": "America/Regina",
+}
+
 
 class Source(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -105,6 +172,10 @@ def source_id_for_candidate(candidate: SourceCandidate) -> str:
 
 def source_from_candidate(candidate: SourceCandidate) -> Source:
     url = str(candidate.url)
+    inferred_region = candidate.region or region_for_candidate_label(candidate)
+    config: dict[str, Any] = {"metadata": candidate.metadata} if candidate.metadata else {}
+    if timezone := timezone_for_candidate(candidate, inferred_region=inferred_region):
+        config["timezone"] = timezone
     return Source(
         id=source_id_for_candidate(candidate),
         fellowship=candidate.fellowship,
@@ -112,9 +183,40 @@ def source_from_candidate(candidate: SourceCandidate) -> Source:
         url=url,
         normalized_url=normalize_source_url(url),
         country=candidate.country,
-        region=candidate.region,
+        region=inferred_region,
         source_type=candidate.source_type,
         adapter_type=candidate.adapter_type,
         requires_browser=candidate.requires_browser,
-        config={"metadata": candidate.metadata} if candidate.metadata else {},
+        config=config,
     )
+
+
+def timezone_for_candidate(
+    candidate: SourceCandidate,
+    *,
+    inferred_region: str | None = None,
+) -> str | None:
+    region = (inferred_region or candidate.region or "").strip().title()
+    country = (candidate.country or "").strip().lower()
+    if country in {"united states", "us", "usa"} and region:
+        return US_REGION_TIMEZONES.get(region)
+    if country == "canada" and region:
+        return CANADA_REGION_TIMEZONES.get(region)
+    return None
+
+
+def region_for_candidate_label(candidate: SourceCandidate) -> str | None:
+    country = (candidate.country or "").strip().lower()
+    label = candidate.label.strip().title()
+    if country in {"united states", "us", "usa"}:
+        return _region_from_label(label, US_REGION_TIMEZONES)
+    if country == "canada":
+        return _region_from_label(label, CANADA_REGION_TIMEZONES)
+    return None
+
+
+def _region_from_label(label: str, region_timezones: dict[str, str]) -> str | None:
+    for region in sorted(region_timezones, key=len, reverse=True):
+        if label == region or region in label:
+            return region
+    return None

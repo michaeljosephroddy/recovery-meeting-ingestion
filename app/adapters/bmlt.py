@@ -65,7 +65,12 @@ class BmltAdapter:
                 MeetingOccurrence(
                     day_of_week=day,
                     start_time_local=start,
-                    timezone=str(item.get("time_zone") or item.get("timezone") or "UTC"),
+                    timezone=str(
+                        item.get("time_zone")
+                        or item.get("timezone")
+                        or self.source.config.get("timezone")
+                        or "UTC"
+                    ),
                 )
             )
         online_url = item.get("virtual_meeting_link") or item.get("url") or None

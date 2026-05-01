@@ -12,6 +12,7 @@ from app.adapters.static_html import StaticHtmlAdapter
 from app.config import Settings
 from app.normalize.canonical import CanonicalMeetingCandidate
 from app.review.flags import ReviewFlag, flags_for_candidate
+from app.scraping.scoring import review_code_for_confidence
 from app.sources.registry import AdapterType, Source
 
 
@@ -39,10 +40,18 @@ async def ingest_source(
     else:
         raw_records = _raw_records_from_fixture(adapter, fixture)
 
-    candidates = [adapter.normalize(raw) for raw in raw_records]
-    review_flags = [
-        flag for candidate in candidates for flag in flags_for_candidate(candidate)
-    ]
+    candidates: list[CanonicalMeetingCandidate] = []
+    review_flags: list[ReviewFlag] = []
+    for raw in raw_records:
+        scrape_confidence = _scrape_confidence(raw)
+        confidence_flag = _review_flag_for_scrape_confidence(raw)
+        if confidence_flag is not None:
+            review_flags.append(confidence_flag)
+        if scrape_confidence is not None and scrape_confidence < 0.45:
+            continue
+        candidate = adapter.normalize(raw)
+        candidates.append(candidate)
+        review_flags.extend(flags_for_candidate(candidate))
     return IngestResult(
         raw_records=raw_records,
         candidates=candidates,
@@ -62,8 +71,37 @@ def adapter_for_source(source: Source, settings: Settings) -> SourceAdapter:
     if source.adapter_type == AdapterType.PDF:
         return PdfAdapter(source, user_agent=settings.user_agent)
     if source.adapter_type == AdapterType.PLAYWRIGHT_BROWSER:
-        return PlaywrightBrowserAdapter(source)
+        return PlaywrightBrowserAdapter(source, user_agent=settings.user_agent)
     raise ValueError(f"unsupported adapter for ingest-source: {source.adapter_type}")
+
+
+def _review_flag_for_scrape_confidence(raw: RawMeeting) -> ReviewFlag | None:
+    confidence = _scrape_confidence(raw)
+    if confidence is None:
+        return None
+    code = review_code_for_confidence(confidence)
+    if code is None:
+        return None
+    severity = "error" if confidence < 0.45 else "warning"
+    return ReviewFlag(
+        code=code,
+        severity=severity,
+        message=f"scraped record confidence is {confidence:.2f}",
+        source_record_id=raw.source_record_id,
+    )
+
+
+def _scrape_confidence(raw: RawMeeting) -> float | None:
+    extraction = raw.payload.get("extraction")
+    if not isinstance(extraction, dict):
+        return None
+    value = extraction.get("confidence")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _raw_records_from_fixture(adapter: SourceAdapter, fixture: Path) -> list[RawMeeting]:

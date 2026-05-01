@@ -1,6 +1,9 @@
 import asyncio
 import re
+from collections.abc import Iterable
 from urllib.parse import urlparse
+
+import httpx
 
 from app.config import Settings
 from app.sources.registry import (
@@ -27,36 +30,43 @@ AA_NOISE_HOSTS = {
 
 
 class AaWorldServicesDiscovery:
-    def __init__(self, settings: Settings, url: str = AA_WORLD_URL) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        url: str = AA_WORLD_URL,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.settings = settings
         self.url = url
+        self.transport = transport
 
     async def fetch_html(self) -> str:
-        import httpx
-
         async with httpx.AsyncClient(
             headers={"User-Agent": self.settings.user_agent},
             timeout=20.0,
             follow_redirects=True,
+            transport=self.transport,
         ) as client:
             response = await client.get(self.url)
             response.raise_for_status()
             return response.text
 
     async def discover(self, max_locations: int | None = None) -> list[SourceCandidate]:
-        import httpx
-
-        queries = (
-            AA_DISCOVERY_QUERIES[:max_locations]
-            if max_locations is not None
-            else AA_DISCOVERY_QUERIES
-        )
         candidates: list[SourceCandidate] = []
         async with httpx.AsyncClient(
             headers={"User-Agent": self.settings.user_agent},
             timeout=30.0,
             follow_redirects=True,
+            transport=self.transport,
         ) as client:
+            index_response = await client.get(self.url)
+            index_response.raise_for_status()
+            candidates.extend(self.parse_html_for_url(index_response.text, str(index_response.url)))
+            queries = aa_filter_queries_from_html(index_response.text)
+            if not queries:
+                queries = list(AA_DISCOVERY_QUERIES)
+            if max_locations is not None:
+                queries = queries[:max_locations]
             for key, value in queries:
                 response = await client.get(self.url, params={key: value})
                 response.raise_for_status()
@@ -128,6 +138,38 @@ class AaWorldServicesDiscovery:
                 )
 
         return _unique_candidates(candidates)
+
+
+def aa_filter_queries_from_html(html: str) -> list[tuple[str, str]]:
+    from selectolax.parser import HTMLParser
+
+    parser = HTMLParser(html)
+    queries: list[tuple[str, str]] = []
+    queries.extend(_option_queries(parser.css("select[name='state']"), key="state"))
+    queries.extend(_option_queries(parser.css("select[name='cc']"), key="cc"))
+    return _unique_queries(queries)
+
+
+def _option_queries(selects: Iterable[object], *, key: str) -> list[tuple[str, str]]:
+    queries: list[tuple[str, str]] = []
+    for select in selects:
+        for option in select.css("option"):  # type: ignore[attr-defined]
+            value = str(option.attributes.get("value") or "").strip()
+            if not value or value == "All":
+                continue
+            queries.append((key, value))
+    return queries
+
+
+def _unique_queries(queries: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    unique: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for query in queries:
+        if query in seen:
+            continue
+        seen.add(query)
+        unique.append(query)
+    return unique
 
 
 def _first_source_link(item, base_url: str) -> str | None:  # type: ignore[no-untyped-def]

@@ -9,5 +9,6 @@ __pycache__/
 .env.*
 !.env.example
 snapshots/
+scrape_artifacts/
 playwright-report/
 test-results/

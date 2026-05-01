@@ -1,5 +1,8 @@
 import asyncio
+from collections import deque
 from urllib.parse import urlparse
+
+import httpx
 
 from app.config import Settings
 from app.sources.registry import (
@@ -13,7 +16,10 @@ from app.sources.registry import (
 CA_WORLD_URL = "https://ca.org/meetings/"
 CA_WORLD_HOSTS = {"ca.org", "www.ca.org"}
 CA_NOISE_HOSTS = {
+    "apps.apple.com",
+    "play.google.com",
     "museum.ca.org",
+    "superbthemes.com",
     "tinyurl.com",
     "wordpress.org",
 }
@@ -24,43 +30,54 @@ CA_NOISE_PATH_PARTS = {
 
 
 class CaWorldServicesDiscovery:
-    def __init__(self, settings: Settings, url: str = CA_WORLD_URL) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        url: str = CA_WORLD_URL,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.settings = settings
         self.url = url
+        self.transport = transport
 
     async def fetch_html(self) -> str:
-        import httpx
-
         async with httpx.AsyncClient(
             headers={"User-Agent": self.settings.user_agent},
             timeout=20.0,
             follow_redirects=True,
+            transport=self.transport,
         ) as client:
             response = await client.get(self.url)
             response.raise_for_status()
             return response.text
 
     async def discover(self, max_locations: int | None = None) -> list[SourceCandidate]:
-        import httpx
-
         async with httpx.AsyncClient(
             headers={"User-Agent": self.settings.user_agent},
             timeout=20.0,
             follow_redirects=True,
+            transport=self.transport,
         ) as client:
             response = await client.get(self.url)
             response.raise_for_status()
             candidates = self.parse_html_for_url(response.text, self.url)
 
-            listing_pages = [
+            listing_queue: deque[SourceCandidate] = deque(
                 candidate
                 for candidate in candidates
                 if candidate.source_type == SourceType.WORLD_SERVICE_LISTING
-            ]
-            if max_locations is not None:
-                listing_pages = listing_pages[:max_locations]
-
-            for page in listing_pages:
+            )
+            fetched_listing_urls: set[str] = set()
+            fetched_count = 0
+            while listing_queue:
+                if max_locations is not None and fetched_count >= max_locations:
+                    break
+                page = listing_queue.popleft()
+                normalized_page_url = normalize_source_url(str(page.url))
+                if normalized_page_url in fetched_listing_urls:
+                    continue
+                fetched_listing_urls.add(normalized_page_url)
+                fetched_count += 1
                 page_response = await client.get(str(page.url))
                 page_response.raise_for_status()
                 final_url = str(page_response.url)
@@ -71,11 +88,22 @@ class CaWorldServicesDiscovery:
                             url=final_url,
                             label=page.label,
                             country=page.country,
+                            region=page.region,
                             source_type=SourceType.LOCAL_SERVICE_BODY,
                             metadata={"world_source": str(page.url)},
                         )
                     )
-                candidates.extend(self.parse_html_for_url(page_response.text, final_url))
+                    if self.settings.default_rate_limit_seconds > 0:
+                        await asyncio.sleep(self.settings.default_rate_limit_seconds)
+                    continue
+                discovered = self.parse_html_for_url(page_response.text, final_url)
+                candidates.extend(discovered)
+                for candidate in discovered:
+                    if candidate.source_type != SourceType.WORLD_SERVICE_LISTING:
+                        continue
+                    normalized_candidate_url = normalize_source_url(str(candidate.url))
+                    if normalized_candidate_url not in fetched_listing_urls:
+                        listing_queue.append(candidate)
                 if self.settings.default_rate_limit_seconds > 0:
                     await asyncio.sleep(self.settings.default_rate_limit_seconds)
 
@@ -110,6 +138,7 @@ class CaWorldServicesDiscovery:
                         url=url,
                         label=label,
                         country=_country_from_meetings_path(url),
+                        region=_region_from_meetings_path(url),
                         source_type=SourceType.WORLD_SERVICE_LISTING,
                         metadata={"world_source": CA_WORLD_URL},
                     )
@@ -131,6 +160,7 @@ class CaWorldServicesDiscovery:
                         url=url,
                         label=label,
                         country=page_country,
+                        region=_region_from_meetings_path(base_url),
                         source_type=source_type,
                         adapter_type=adapter_type,
                         metadata={"world_source": base_url},
@@ -162,6 +192,13 @@ def _country_from_meetings_path(url: str) -> str | None:
     if len(path_parts) < 2 or path_parts[0] != "meetings":
         return None
     return path_parts[1].replace("-", " ").title()
+
+
+def _region_from_meetings_path(url: str) -> str | None:
+    path_parts = [part for part in urlparse(url).path.split("/") if part]
+    if len(path_parts) < 3 or path_parts[0] != "meetings":
+        return None
+    return path_parts[-1].replace("-", " ").title()
 
 
 def _unique_candidates(candidates: list[SourceCandidate]) -> list[SourceCandidate]:

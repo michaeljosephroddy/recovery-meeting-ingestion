@@ -1,6 +1,8 @@
 from typing import Any
 
-from selectolax.parser import HTMLParser, Node
+from bs4 import BeautifulSoup
+from bs4.element import Tag
+from soupsieve import match as selector_matches
 
 from app.adapters.base import AdapterPayloadError
 
@@ -15,9 +17,9 @@ def configured_selectors(config: dict[str, Any]) -> dict[str, str]:
 
 
 def extract_records_from_html(html: str, selectors: dict[str, str]) -> list[dict[str, Any]]:
-    parser = HTMLParser(html)
+    soup = BeautifulSoup(html, "html.parser")
     records: list[dict[str, Any]] = []
-    rows = parser.css(selectors["row"])
+    rows = soup.select(selectors["row"])
     for index, row in enumerate(rows):
         payload: dict[str, Any] = {"row_index": index}
         for field, selector in selectors.items():
@@ -28,17 +30,19 @@ def extract_records_from_html(html: str, selectors: dict[str, str]) -> list[dict
     return records
 
 
-def _text_or_attr(row: Node, selector: str) -> str | None:
+def _text_or_attr(row: Tag, selector: str) -> str | None:
     attr_name: str | None = None
     css_selector = selector
     if "::attr(" in selector and selector.endswith(")"):
         css_selector, attr_part = selector.split("::attr(", 1)
         attr_name = attr_part[:-1]
-    node = row.css_first(css_selector)
+    node = row if selector_matches(css_selector, row) else row.select_one(css_selector)
     if node is None:
         return None
     if attr_name:
-        return node.attributes.get(attr_name)
-    text = " ".join(node.text(separator=" ", strip=True).split())
+        value = node.get(attr_name)
+        if isinstance(value, list):
+            return " ".join(str(item) for item in value).strip() or None
+        return str(value).strip() if value is not None else None
+    text = " ".join(node.get_text(separator=" ", strip=True).split())
     return text or None
-
