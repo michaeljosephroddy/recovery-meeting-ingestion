@@ -7,16 +7,13 @@ from bs4.element import Tag
 
 from app.adapters.html_config import configured_selectors, extract_records_from_html
 from app.scraping.meeting_page_detector import score_html
+from app.scraping.meeting_vocabulary import DAY_RE
 from app.scraping.models import ExtractedMeeting
 from app.scraping.scoring import confidence_for_payload
 
-DAY_RE = re.compile(
-    r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
-    r"mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b",
-    re.IGNORECASE,
-)
 TIME_RE = re.compile(
-    r"\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)|12\s*noon|midnight)"
+    r"\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)|"
+    r"(?:[01]?\d|2[0-3]):[0-5]\d|12\s*noon|midnight)"
     r"(?=\W|$)",
     re.IGNORECASE,
 )
@@ -43,8 +40,8 @@ ONLINE_MEETING_URL_RE = re.compile(
 )
 HEADER_MAP = {
     "name": {"meeting", "meeting name", "group", "group name", "name"},
-    "day": {"day", "weekday"},
-    "time": {"time", "start", "start time"},
+    "day": {"day", "weekday", "dia", "día", "jour"},
+    "time": {"time", "start", "start time", "hora", "horário", "horario", "heure"},
     "venue_name": {"venue", "location", "place"},
     "address_line1": {"address", "street"},
     "city": {"city", "town"},
@@ -75,6 +72,10 @@ def extract_meetings_from_html(
     extracted.extend(_extract_tables(soup, source_page_url, page_score))
     extracted.extend(_extract_cards(soup, source_page_url, page_score))
     extracted.extend(_extract_day_sections(soup, source_page_url, page_score))
+    if not extracted:
+        extracted.extend(_extract_direct_listing_blocks(soup, source_page_url, page_score))
+    if not extracted:
+        extracted.extend(_extract_structured_text_meetings(soup, source_page_url, page_score))
     if not extracted:
         extracted.extend(_extract_text_blocks(soup, source_page_url, page_score))
     return _dedupe_extracted(extracted)
@@ -251,6 +252,8 @@ def _extract_cards(
         for index, tag in enumerate(soup.select(selector)):
             if not isinstance(tag, Tag):
                 continue
+            if selector == "article" and tag.select_one(".entry-content"):
+                continue
             text = tag.get_text("\n", strip=True)
             if len(text) > 800 or not (DAY_RE.search(text) and TIME_RE.search(text)):
                 continue
@@ -301,6 +304,7 @@ def _extract_day_sections(
             continue
         current_day = _day_from_title(container) or _day_from_title(soup)
         pending: dict[str, Any] | None = None
+        pending_name: str | None = None
         row_index = 0
         for line in lines:
             day_heading = _day_heading_or_none(line)
@@ -311,6 +315,7 @@ def _extract_day_sections(
                     )
                     row_index += 1
                     pending = None
+                pending_name = None
                 current_day = day_heading
                 continue
             time = _first_match(TIME_RE, line)
@@ -321,10 +326,28 @@ def _extract_day_sections(
                     )
                     row_index += 1
                 pending = {"day": current_day, "time": _normalize_extracted_time(time)}
+                if pending_name:
+                    pending["name"] = pending_name
+                    pending_name = None
                 _merge_time_line_remainder(pending, line, time)
+                continue
+            if (
+                pending is not None
+                and pending.get("name")
+                and _looks_like_next_meeting_name(line)
+            ):
+                _append_pending_day_section(
+                    meetings, pending, source_page_url, page_score, container_index, row_index
+                )
+                row_index += 1
+                pending = None
+                pending_name = _clean_meeting_name_line(line)
                 continue
             if pending is not None:
                 _merge_day_section_line(pending, line)
+                continue
+            if not pending_name and _looks_like_next_meeting_name(line):
+                pending_name = _clean_meeting_name_line(line)
         if pending is not None:
             _append_pending_day_section(
                 meetings, pending, source_page_url, page_score, container_index, row_index
@@ -371,6 +394,91 @@ def _extract_text_blocks(
                 selector_hint="text_block",
             )
         )
+    return meetings
+
+
+def _extract_structured_text_meetings(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    lines = [_clean_fragment(line) for line in soup.get_text("\n", strip=True).splitlines()]
+    lines = [line for line in lines if line and line != "\u200b"]
+    if "Number found:" not in lines:
+        return []
+    meetings: list[ExtractedMeeting] = []
+    start_index = _structured_text_start_index(lines)
+    index = start_index
+    row_index = 0
+    while index < len(lines) - 2:
+        if not _is_structured_text_meeting_start(lines, index):
+            index += 1
+            continue
+        next_index = _next_structured_text_meeting_index(lines, index + 3)
+        payload = _payload_from_structured_text_block(lines[index:next_index])
+        payload = _without_empty(payload)
+        if _looks_like_meeting_payload(payload):
+            confidence, signals = confidence_for_payload(
+                payload,
+                method="heuristic_structured_text_list",
+                page_score=page_score,
+                repeated_structure=True,
+            )
+            meetings.append(
+                ExtractedMeeting(
+                    payload={**payload, "row_index": row_index},
+                    method="heuristic_structured_text_list",
+                    confidence=confidence,
+                    source_page_url=source_page_url,
+                    signals=signals,
+                    selector_hint="structured_text_list",
+                )
+            )
+            row_index += 1
+        index = max(next_index, index + 1)
+    return meetings
+
+
+def _extract_direct_listing_blocks(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    meetings: list[ExtractedMeeting] = []
+    containers = soup.select(".entry-content, article, main") or [soup]
+    for container_index, container in enumerate(containers):
+        section_name: str | None = None
+        for row_index, paragraph in enumerate(container.select("p")):
+            text = _clean_text(paragraph)
+            if not text:
+                continue
+            if not (DAY_RE.search(text) and TIME_RE.search(text)):
+                section_name = _direct_listing_section_name(paragraph) or section_name
+                continue
+            payload = _payload_from_direct_listing_paragraph(
+                paragraph,
+                section_name,
+                source_page_url,
+            )
+            payload = _without_empty(payload)
+            if not _looks_like_meeting_payload(payload):
+                continue
+            confidence, signals = confidence_for_payload(
+                payload,
+                method="heuristic_direct_listing",
+                page_score=page_score,
+                repeated_structure=True,
+            )
+            meetings.append(
+                ExtractedMeeting(
+                    payload={**payload, "row_index": row_index},
+                    method="heuristic_direct_listing",
+                    confidence=confidence,
+                    source_page_url=source_page_url,
+                    signals=signals,
+                    selector_hint=f"direct_listing:{container_index}",
+                )
+            )
     return meetings
 
 
@@ -456,14 +564,86 @@ def _payload_from_text(text: str) -> dict[str, str]:
     return payload
 
 
+def _payload_from_direct_listing_paragraph(
+    paragraph: Tag,
+    section_name: str | None,
+    source_page_url: str,
+) -> dict[str, str]:
+    text = paragraph.get_text("\n", strip=True)
+    day = _first_match(DAY_RE, text)
+    time = _first_match(TIME_RE, text)
+    payload: dict[str, str] = {}
+    if day:
+        payload["day"] = day
+    if time:
+        payload["time"] = _normalize_extracted_time(time)
+    if name := _direct_listing_name(paragraph, section_name):
+        payload["name"] = name
+
+    for line in (_clean_fragment(part) for part in text.splitlines()):
+        if not line:
+            continue
+        if time and TIME_RE.search(line):
+            remainder = _clean_direct_listing_time_remainder(line, time)
+            if remainder:
+                _merge_direct_listing_line(payload, remainder)
+            continue
+        _merge_direct_listing_line(payload, line)
+
+    for link in paragraph.select("a[href]"):
+        href = str(link.get("href") or "")
+        if not href:
+            continue
+        absolute_url = urljoin(source_page_url, href)
+        if online_url := _meeting_url_or_none(absolute_url):
+            payload.setdefault("online_url", online_url)
+            continue
+        link_text = _clean_text(link)
+        if link_text and _looks_like_address_fallback(link_text):
+            payload.setdefault("address_line1", link_text)
+
+    return payload
+
+
+def _payload_from_structured_text_block(lines: list[str]) -> dict[str, str]:
+    payload: dict[str, str] = {
+        "name": lines[0],
+        "day": _structured_text_day(lines[1]),
+        "time": _normalize_extracted_time(lines[2]),
+    }
+    if len(lines) > 3 and lines[3].lower() in {"online", "in-person", "in person", "hybrid"}:
+        payload["attendance_option"] = lines[3]
+    if len(lines) > 4 and not _is_placeholder_line(lines[4]):
+        payload["city"] = lines[4]
+
+    detail_lines = [line for line in lines[5:] if not _is_placeholder_line(line)]
+    connection_lines: list[str] = []
+    for line in detail_lines:
+        lowered = line.lower()
+        if lowered.startswith("attendance is limited"):
+            break
+        if _is_connection_line(line):
+            connection_lines.append(line)
+            continue
+        if not payload.get("formats") and "meeting" in lowered:
+            payload["formats"] = line
+            continue
+        if not payload.get("address_line1") and _looks_like_address_fallback(line):
+            payload["address_line1"] = line
+            continue
+        if not payload.get("venue_name") and not _is_instruction_line(line):
+            payload["venue_name"] = line
+    if connection_lines:
+        payload["phone_join_info"] = " ".join(connection_lines)
+    return payload
+
+
 def _day_section_lines(container: Tag) -> list[str]:
     lines: list[str] = []
     for node in container.select("h1, h2, h3, h4, p, li"):
-        text = node.get_text("\n", strip=True)
-        for line in text.splitlines():
-            cleaned = _clean_fragment(line)
-            if cleaned:
-                lines.append(cleaned)
+        cleaned = _clean_fragment(_clean_text(node))
+        if cleaned:
+            lines.append(cleaned)
     return lines
 
 
@@ -476,17 +656,20 @@ def _day_from_title(container: Tag | BeautifulSoup) -> str | None:
 
 def _day_heading_or_none(text: str) -> str | None:
     cleaned = _clean_fragment(text)
-    if len(cleaned) > 20 or TIME_RE.search(cleaned):
+    if len(cleaned) > 32 or TIME_RE.search(cleaned):
         return None
     lowered = cleaned.lower()
-    for day in ("sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"):
-        if lowered == day or lowered == f"{day}s":
-            return day.title()
+    match = DAY_RE.fullmatch(lowered)
+    if match is None and lowered.endswith("s"):
+        match = DAY_RE.fullmatch(lowered.removesuffix("s"))
+    if match:
+        return match.group(0).title()
     return None
 
 
 def _merge_time_line_remainder(payload: dict[str, Any], line: str, time: str) -> None:
     remainder = _clean_fragment(line.replace(time, "", 1))
+    remainder = _clean_schedule_remainder(remainder)
     if not remainder:
         return
     if _looks_like_format_text(remainder):
@@ -499,10 +682,28 @@ def _merge_day_section_line(payload: dict[str, Any], line: str) -> None:
     line = _clean_fragment(line)
     if not line:
         return
+    if _is_timezone_only_line(line):
+        return
     lowered = line.lower()
-    if "zoom" in lowered or "meeting id" in lowered or "passcode" in lowered:
+    if (
+        "zoom" in lowered
+        or "meeting id" in lowered
+        or "passcode" in lowered
+        or "hasło" in lowered
+        or lowered.startswith(("contact", "phone", "tel", "whatsapp"))
+    ):
         existing = str(payload.get("phone_join_info") or "")
-        payload["phone_join_info"] = " ".join(part for part in (existing, line) if part).strip()
+        cleaned = _clean_connection_line(line)
+        payload["phone_join_info"] = " ".join(part for part in (existing, cleaned) if part).strip()
+        return
+    if _is_ignored_detail_line(line):
+        return
+    if str(payload.get("name") or "").lower() == line.lower():
+        return
+    if lowered.startswith(("adres:", "adres :")):
+        address = _clean_fragment(re.sub(r"^adres\s*:?\s*", "", line, flags=re.IGNORECASE))
+        if address:
+            payload.setdefault("address_line1", address)
         return
     if ADDRESS_RE.search(line):
         payload.setdefault("address_line1", line)
@@ -522,6 +723,195 @@ def _merge_day_section_line(payload: dict[str, Any], line: str) -> None:
         return
 
 
+def _looks_like_next_meeting_name(line: str) -> bool:
+    cleaned = _clean_meeting_name_line(line)
+    if not cleaned:
+        return False
+    if _is_timezone_only_line(cleaned):
+        return False
+    lowered = cleaned.lower()
+    if _is_ignored_detail_line(cleaned) or lowered.startswith(("adres", "zoom", "meeting id")):
+        return False
+    if any(term in lowered for term in ("zoom", "meeting id", "passcode", "hasło")):
+        return False
+    if lowered.startswith(("online ", "telephone ", "phone ")):
+        return False
+    if TIME_RE.search(cleaned) or DAY_RE.search(cleaned):
+        return False
+    if ADDRESS_RE.search(cleaned):
+        return False
+    return bool(any(char.isalpha() for char in cleaned))
+
+
+def _clean_meeting_name_line(line: str) -> str:
+    cleaned = _clean_fragment(line)
+    cleaned = re.sub(r"^(grupa|group)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("“", "").replace("”", "").replace("„", "").replace('"', "")
+    cleaned = re.sub(r"\((?:mityng|miting|meeting)[^)]+\)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(TEXT_STRIP_CHARS)
+    return cleaned
+
+
+def _clean_connection_line(line: str) -> str:
+    cleaned = re.sub(r"\bAktywny\s+link\b", "", line, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bAktywny\b", "", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", cleaned).strip(TEXT_STRIP_CHARS)
+
+
+def _clean_schedule_remainder(text: str) -> str:
+    cleaned = re.sub(
+        r"^(?:każdy|każda|codziennie)?\s*[\wąćęłńóśźżĄĆĘŁŃÓŚŹŻ-]*\s*"
+        r"(?:o\s+)?godzinie\s*:?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\b(?:PL|UK)\s*:?\s*$", "", cleaned, flags=re.IGNORECASE)
+    if _is_timezone_only_line(cleaned):
+        return ""
+    return _clean_fragment(cleaned)
+
+
+def _clean_direct_listing_time_remainder(line: str, time: str) -> str:
+    remainder = _clean_fragment(line.replace(time, "", 1))
+    remainder = _clean_fragment(DAY_RE.sub("", remainder, count=1))
+    remainder = re.sub(
+        r"^[–—-]?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?\s*[–—-]?\s*",
+        "",
+        remainder,
+        flags=re.IGNORECASE,
+    )
+    remainder = re.sub(
+        r"^[|–—-]+\s*\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?\s*",
+        "",
+        remainder,
+        flags=re.IGNORECASE,
+    )
+    return _clean_fragment(remainder)
+
+
+def _direct_listing_section_name(paragraph: Tag) -> str | None:
+    strongs = [_clean_text(strong) for strong in paragraph.select("strong")]
+    for strong in strongs:
+        if strong and not (DAY_RE.search(strong) or TIME_RE.search(strong)):
+            return _clean_meeting_name_line(strong)
+    return None
+
+
+def _direct_listing_name(paragraph: Tag, section_name: str | None) -> str | None:
+    strongs = [_clean_text(strong) for strong in paragraph.select("strong")]
+    for strong in strongs:
+        if not strong or DAY_RE.search(strong) or TIME_RE.search(strong):
+            continue
+        if ":" in strong:
+            continue
+        return _clean_meeting_name_line(strong)
+    return _clean_meeting_name_line(section_name or "") or None
+
+
+def _merge_direct_listing_line(payload: dict[str, str], line: str) -> None:
+    lowered = line.lower()
+    if str(payload.get("name") or "").lower() == lowered:
+        return
+    if lowered.startswith("city "):
+        payload.setdefault("city", _clean_fragment(line[5:]))
+        return
+    if _looks_like_address_fallback(line):
+        payload.setdefault("address_line1", line)
+        return
+    _merge_day_section_line(payload, line)
+
+
+def _structured_text_start_index(lines: list[str]) -> int:
+    for index, line in enumerate(lines):
+        if line.startswith("All meetings open"):
+            return index + 1
+    try:
+        return lines.index("Number found:") + 1
+    except ValueError:
+        return 0
+
+
+def _is_structured_text_meeting_start(lines: list[str], index: int) -> bool:
+    return bool(
+        index + 2 < len(lines)
+        and _structured_text_day(lines[index + 1])
+        and _first_match(TIME_RE, lines[index + 2])
+    )
+
+
+def _next_structured_text_meeting_index(lines: list[str], start_index: int) -> int:
+    for index in range(start_index, len(lines) - 2):
+        if _is_structured_text_meeting_start(lines, index):
+            return index
+    return len(lines)
+
+
+def _structured_text_day(line: str) -> str:
+    cleaned = re.sub(r"^\(\d+\)\s*", "", line).strip()
+    day = _first_match(DAY_RE, cleaned)
+    return day or ""
+
+
+def _is_placeholder_line(line: str) -> bool:
+    return line.strip() in {"", "\u200b"}
+
+
+def _is_connection_line(line: str) -> bool:
+    lowered = line.lower()
+    return any(
+        term in lowered
+        for term in (
+            "access code",
+            "click here",
+            "meeting id",
+            "passcode",
+            "password",
+            "zoom",
+        )
+    )
+
+
+def _is_instruction_line(line: str) -> bool:
+    lowered = line.lower()
+    return any(
+        term in lowered
+        for term in (
+            "attendance is limited",
+            "enter by",
+            "main entrance",
+            "not wheelchair",
+            "wheelchair",
+        )
+    )
+
+
+def _looks_like_address_fallback(line: str) -> bool:
+    lowered = line.lower()
+    if "@" in line or _is_timezone_only_line(line):
+        return False
+    if any(term in lowered for term in ("meeting id", "passcode", "hasło", "contact")):
+        return False
+    return any(char.isdigit() for char in line) and len(line) <= 180
+
+
+def _is_timezone_only_line(line: str) -> bool:
+    cleaned = re.sub(TIME_RE, "", line)
+    cleaned = re.sub(
+        r"\b(?:PL|UK|GMT|UTC|CET|CEST|BST|EST|EDT|CST|CDT|MST|MDT|PST|PDT)\b",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"[\s:|,;/\\()–—-]+", "", cleaned)
+    return not cleaned
+
+
+def _is_ignored_detail_line(line: str) -> bool:
+    lowered = line.lower().strip()
+    return lowered in {"aktywny", "aktywny link", "link", "adres:", "adres :"}
+
+
 def _looks_like_format_text(text: str) -> bool:
     compact = re.sub(r"[\s/|.()-]", "", text).lower()
     letters = [char for char in text if char.isalpha()]
@@ -533,7 +923,20 @@ def _looks_like_format_text(text: str) -> bool:
 
 def _looks_like_city_line(text: str) -> bool:
     lowered = text.lower()
-    if any(term in lowered for term in ("meeting", "smoking", "zoom", "passcode")):
+    if any(
+        term in lowered
+        for term in (
+            "book",
+            "meeting",
+            "newcomer",
+            "passcode",
+            "smoking",
+            "step",
+            "study",
+            "tradition",
+            "zoom",
+        )
+    ):
         return False
     return not any(char.isdigit() for char in text) and len(text.split()) <= 4
 

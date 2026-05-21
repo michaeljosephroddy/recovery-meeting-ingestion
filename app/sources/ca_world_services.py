@@ -15,18 +15,27 @@ from app.sources.registry import (
 
 CA_WORLD_URL = "https://ca.org/meetings/"
 CA_WORLD_HOSTS = {"ca.org", "www.ca.org"}
+CA_ONLINE_HOSTS = {"ca-online.org", "www.ca-online.org"}
 CA_NOISE_HOSTS = {
     "apps.apple.com",
+    "calendar.google.com",
+    "docs.google.com",
+    "drive.google.com",
+    "goo.gl",
+    "maps.app.goo.gl",
+    "meet.google.com",
     "play.google.com",
     "museum.ca.org",
     "superbthemes.com",
     "tinyurl.com",
     "wordpress.org",
+    "zoom.us",
 }
 CA_NOISE_PATH_PARTS = {
     "newsgram",
     "gdpr-cookie-compliance",
 }
+CA_ONLINE_LOCAL_SOURCE_PATHS = {"", "/"}
 
 
 class CaWorldServicesDiscovery:
@@ -181,10 +190,20 @@ def _is_ca_world_listing(parsed_url) -> bool:  # type: ignore[no-untyped-def]
 
 def _is_external_local_source(parsed_url) -> bool:  # type: ignore[no-untyped-def]
     host = parsed_url.netloc.lower()
+    base_host = host.removeprefix("www.")
     path = parsed_url.path.lower()
-    if host in CA_WORLD_HOSTS or host in CA_NOISE_HOSTS:
+    if host in CA_WORLD_HOSTS or host in CA_NOISE_HOSTS or base_host in CA_NOISE_HOSTS:
         return False
+    if host.endswith(".zoom.us"):
+        return False
+    if host in CA_ONLINE_HOSTS:
+        return path.rstrip("/") in CA_ONLINE_LOCAL_SOURCE_PATHS
     return not any(part in path for part in CA_NOISE_PATH_PARTS)
+
+
+def is_valid_ca_local_source_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return _is_external_local_source(parsed)
 
 
 def _country_from_meetings_path(url: str) -> str | None:

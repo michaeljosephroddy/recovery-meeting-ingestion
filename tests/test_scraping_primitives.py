@@ -1,8 +1,21 @@
-from app.scraping.browser_crawler import is_allowed_url, prioritize_links
+from app.scraping.browser_crawler import (
+    _wix_data_items_to_text,
+    common_meeting_path_links,
+    initial_crawl_queue,
+    is_allowed_url,
+    prioritize_links,
+    should_stop_after_page,
+)
 from app.scraping.evidence import read_scrape_summary, write_scrape_evidence
 from app.scraping.extract_meetings import extract_meetings_from_html
 from app.scraping.meeting_page_detector import score_html, score_link
-from app.scraping.models import BrowserActionTrace, ScrapedPage, ScrapeSourceResult
+from app.scraping.models import (
+    BrowserActionTrace,
+    CrawlSettings,
+    ExtractedMeeting,
+    ScrapedPage,
+    ScrapeSourceResult,
+)
 from app.scraping.scoring import review_code_for_confidence
 
 
@@ -176,6 +189,157 @@ def test_extract_meetings_from_wordpress_day_sections() -> None:
     assert meetings[1].payload["phone_join_info"] == "ONLINE Zoom Meeting Meeting ID: 852 9758 1348"
 
 
+def test_extract_meetings_from_polish_day_sections() -> None:
+    html = """
+    <article>
+      <div class="entry-content">
+        <h2>PONIEDZIAŁEK</h2>
+        <p>Grupa “Po prostu przyjdź”</p>
+        <p>Każdy Poniedziałek o godzinie: PL 19:30</p>
+        <p>Adres: Warszawa ul. Aleje Jerozolimskie 99/40</p>
+        <p>Jest Rozwiązanie (mityng hybrydowy)</p>
+        <p>Każdy Poniedziałek o godzinie: PL 20:00 UK 19:00</p>
+        <p>Adres: YMCA - Hinton Room, 56 Westover Rd, Bournemouth</p>
+        <p>Zoom: Meeting ID: 874 3213 3552 Hasło: 441475 Aktywny link</p>
+      </div>
+    </article>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://ca-polska.org/spotkania/",
+    )
+
+    assert [meeting.payload["name"] for meeting in meetings] == [
+        "Po prostu przyjdź",
+        "Jest Rozwiązanie",
+    ]
+    assert meetings[0].payload["day"] == "Poniedziałek"
+    assert meetings[0].payload["time"] == "19:30"
+    assert meetings[0].payload["address_line1"] == "Warszawa ul. Aleje Jerozolimskie 99/40"
+    assert meetings[1].payload["time"] == "20:00"
+    assert "Hasło: 441475" in meetings[1].payload["phone_join_info"]
+    assert "Aktywny link" not in meetings[1].payload["phone_join_info"]
+
+
+def test_extract_meetings_from_world_service_direct_listing() -> None:
+    html = """
+    <article>
+      <div class="entry-content">
+        <p><strong>Wednesday 5:30 pm | City Playa Del Carmen</strong><br>
+        NA clubhouse<br>
+        The North/West corner of Calle/Street 30 and Ave 35<br>
+        Contact # 1-732-261-8314</p>
+        <p><strong>English CA Cancun meetings</strong></p>
+        <p><strong>Tuesday 5:00 pm - 6:00 pm</strong><br>
+        <strong>XYZ32</strong><br>
+        <a href="https://maps.example.test/place">Av Carlos just Nadar sm5 mz8</a><br>
+        Step and tradition study</p>
+        <p><strong>Thursday 5:00 pm - 6:00 pm</strong> - Big Book study<br>
+        <strong>Desert in the Oasis Futility</strong><br>
+        <a href="https://maps.example.test/place">Av Carlos just Nadar sm5 mz8</a></p>
+      </div>
+    </article>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://ca.org/meetings/mexico/",
+    )
+
+    assert [meeting.method for meeting in meetings] == [
+        "heuristic_direct_listing",
+        "heuristic_direct_listing",
+        "heuristic_direct_listing",
+    ]
+    assert meetings[0].payload["day"] == "Wednesday"
+    assert meetings[0].payload["time"] == "5:30 pm"
+    assert meetings[0].payload["city"] == "Playa Del Carmen"
+    assert "1-732-261-8314" in meetings[0].payload["phone_join_info"]
+    assert meetings[1].payload["name"] == "XYZ32"
+    assert meetings[1].payload["address_line1"] == "Av Carlos just Nadar sm5 mz8"
+    assert meetings[2].payload["name"] == "Desert in the Oasis Futility"
+
+
+def test_extract_meetings_from_rendered_structured_text_list() -> None:
+    html = """
+    <pre>
+    Number found:
+    All meetings open 15 to 30 minutes prior to their start time indicated.
+    C.A. Bachelor's Walk
+    (1) Monday
+    1:00 pm
+    Online
+    All Ireland
+    Beginners / Newcomers Meeting
+    Zoom Link: Click Here
+    Access Code: 733 233 3432
+    Passcode: cabachelor
+    Attendance is limited to C.A. members and those with a desire to stop using cocaine.
+    C.A. Oz House
+    (1) Monday
+    3:00 pm
+    In-person
+    Co. Galway
+    Big Book Study Meeting
+    Ozanam House, Room 3, St. Augustine Street, Galway, H91 V3PV
+    Enter by blue door on the left.
+    Attendance is limited to C.A. members and those with a desire to stop using cocaine.
+    </pre>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://www.caireland.live/meeting-schedule",
+    )
+
+    assert [meeting.method for meeting in meetings] == [
+        "heuristic_structured_text_list",
+        "heuristic_structured_text_list",
+    ]
+    assert meetings[0].payload["name"] == "C.A. Bachelor's Walk"
+    assert meetings[0].payload["day"] == "Monday"
+    assert meetings[0].payload["phone_join_info"] == (
+        "Zoom Link: Click Here Access Code: 733 233 3432 Passcode: cabachelor"
+    )
+    assert meetings[1].payload["attendance_option"] == "In-person"
+    assert meetings[1].payload["address_line1"] == (
+        "Ozanam House, Room 3, St. Augustine Street, Galway, H91 V3PV"
+    )
+
+
+def test_wix_data_items_convert_to_structured_text_meetings() -> None:
+    text = _wix_data_items_to_text(
+        [
+            {
+                "data": {
+                    "title": "C.A. Bachelor's Walk",
+                    "requirements": "(1) Monday",
+                    "time": "1:00 pm",
+                    "jobType1": "Online",
+                    "county": "All Ireland",
+                    "jobDescription": "Beginners / Newcomers Meeting",
+                    "location": (
+                        '<p><a href="https://example.test">Zoom Link: Click Here</a></p>'
+                        "<p>Access Code: 733 233 3432</p>"
+                    ),
+                }
+            }
+        ]
+    )
+
+    meetings = extract_meetings_from_html(
+        f"<pre>{text}</pre>",
+        source_page_url="https://www.caireland.live/meeting-schedule",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].payload["name"] == "C.A. Bachelor's Walk"
+    assert meetings[0].payload["phone_join_info"] == (
+        "Zoom Link: Click Here Access Code: 733 233 3432"
+    )
+
+
 def test_extract_meetings_from_repeated_cards() -> None:
     html = """
     <section>
@@ -300,10 +464,82 @@ def test_crawler_prioritizes_meeting_links_and_stays_on_site() -> None:
 
     prioritized = prioritize_links("https://example.org/", links)
 
-    assert [link["url"] for link in prioritized] == [
-        "https://example.org/find-a-meeting",
-        "https://example.org/news",
-        "https://example.org/donate",
-    ]
+    assert [link["url"] for link in prioritized] == ["https://example.org/find-a-meeting"]
     assert is_allowed_url("https://example.org/", "https://meetings.example.org/list")
     assert not is_allowed_url("https://example.org/", "https://external.test/meetings")
+
+
+def test_crawler_prioritizes_public_meeting_tabs_over_service_pages() -> None:
+    links = [
+        {
+            "url": "https://forms.cocaineanonymous.org.uk/start-a-meeting/",
+            "text": "Register a new meeting",
+        },
+        {
+            "url": "https://cocaineanonymous.org.uk/service-meetings/",
+            "text": "Service meetings",
+        },
+        {
+            "url": "https://meetings.cocaineanonymous.org.uk/meetings/?tsml-attendance_option=in_person",
+            "text": "Find a face-to-face meeting",
+        },
+    ]
+
+    prioritized = prioritize_links("https://www.cocaineanonymous.org.uk/", links)
+    urls = [link["url"] for link in prioritized]
+
+    assert urls[:2] == [
+        "https://meetings.cocaineanonymous.org.uk/meetings/?tsml-attendance_option=in_person",
+    ]
+    assert "https://cocaineanonymous.org.uk/service-meetings/" not in urls
+    assert "https://forms.cocaineanonymous.org.uk/start-a-meeting/" not in urls
+
+
+def test_crawler_prioritizes_ireland_meeting_schedule_tab() -> None:
+    links = [
+        {"url": "https://www.caireland.live/events", "text": "Events"},
+        {"url": "https://www.caireland.live/meeting-schedule", "text": "Meetings"},
+        {"url": "https://www.caireland.live/contact", "text": "Contact"},
+    ]
+
+    prioritized = prioritize_links("https://www.caireland.live/", links)
+
+    assert [link["url"] for link in prioritized] == [
+        "https://www.caireland.live/meeting-schedule"
+    ]
+
+
+def test_crawler_starts_with_source_before_targeted_discovery() -> None:
+    queue = initial_crawl_queue("https://www.caireland.live/")
+    urls = [url for url, _depth in queue]
+
+    assert urls == ["https://www.caireland.live/"]
+
+
+def test_crawler_can_fallback_to_common_meeting_paths() -> None:
+    links = common_meeting_path_links("https://www.caireland.live/")
+    urls = [link["url"] for link in links]
+
+    assert "https://www.caireland.live/meeting-schedule" in urls
+    assert "https://www.caireland.live/meetings/" in urls
+
+
+def test_crawler_stops_after_successful_meeting_directory() -> None:
+    page = ScrapedPage(
+        url="https://example.org/meetings",
+        final_url="https://example.org/meetings",
+        title="Meetings",
+        html="",
+        page_score=0.9,
+        extracted=[
+            ExtractedMeeting(
+                payload={"name": "Monday Main"},
+                method="test",
+                confidence=0.9,
+                source_page_url="https://example.org/meetings",
+            )
+            for _ in range(3)
+        ],
+    )
+
+    assert should_stop_after_page(page, CrawlSettings())

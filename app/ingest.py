@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.adapters.base import RawMeeting, SourceAdapter
+from app.adapters.base import AdapterPayloadError, RawMeeting, SourceAdapter
 from app.adapters.bmlt import BmltAdapter
 from app.adapters.form_http import FormHttpAdapter
 from app.adapters.meeting_guide import MeetingGuideAdapter
@@ -40,6 +40,15 @@ async def ingest_source(
     else:
         raw_records = _raw_records_from_fixture(adapter, fixture)
 
+    return ingest_raw_records(source, settings, raw_records)
+
+
+def ingest_raw_records(
+    source: Source,
+    settings: Settings,
+    raw_records: list[RawMeeting],
+) -> IngestResult:
+    adapter = adapter_for_source(source, settings)
     candidates: list[CanonicalMeetingCandidate] = []
     review_flags: list[ReviewFlag] = []
     for raw in raw_records:
@@ -49,7 +58,18 @@ async def ingest_source(
             review_flags.append(confidence_flag)
         if scrape_confidence is not None and scrape_confidence < 0.45:
             continue
-        candidate = adapter.normalize(raw)
+        try:
+            candidate = adapter.normalize(raw)
+        except (AdapterPayloadError, ValueError) as exc:
+            review_flags.append(
+                ReviewFlag(
+                    code="scrape_normalization_failed",
+                    severity="error",
+                    message=f"scraped record could not be normalized: {exc}",
+                    source_record_id=raw.source_record_id,
+                )
+            )
+            continue
         candidates.append(candidate)
         review_flags.extend(flags_for_candidate(candidate))
     return IngestResult(

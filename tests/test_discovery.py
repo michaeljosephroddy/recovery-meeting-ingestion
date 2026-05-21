@@ -2,7 +2,11 @@ import httpx
 
 from app.config import Settings
 from app.sources.aa_world_services import AaWorldServicesDiscovery, aa_filter_queries_from_html
-from app.sources.ca_world_services import CA_WORLD_URL, CaWorldServicesDiscovery
+from app.sources.ca_world_services import (
+    CA_WORLD_URL,
+    CaWorldServicesDiscovery,
+    is_valid_ca_local_source_url,
+)
 from app.sources.na_world_services import (
     NA_WORLD_URL,
     NaWorldServicesDiscovery,
@@ -106,6 +110,39 @@ def test_ca_country_fixture_produces_local_source_candidates() -> None:
     assert candidates[0].fellowship == "ca"
     assert str(candidates[0].url) == "https://www.caireland.live"
     assert candidates[0].country == "Ireland"
+
+
+def test_ca_discovery_filters_ca_online_internal_and_direct_meeting_links() -> None:
+    discovery = CaWorldServicesDiscovery(Settings())
+    candidates = discovery.parse_html_for_url(
+        """
+        <a href="https://ca-online.org/">Online Service Area</a>
+        <a href="https://ca-online.org/committees/">Committees</a>
+        <a href="https://ca-online.org/osa-store/">Store</a>
+        <a href="https://apps.apple.com/app/id6504262893">Mobile app</a>
+        <a href="https://us02web.zoom.us/j/123456789">Zoom room</a>
+        <a href="https://maps.app.goo.gl/example">Map</a>
+        """,
+        "https://ca.org/meetings/online-meetings/",
+    )
+
+    urls = {str(candidate.url).rstrip("/") for candidate in candidates}
+
+    assert "https://ca-online.org" in urls
+    assert "https://ca-online.org/committees" not in urls
+    assert "https://ca-online.org/osa-store" not in urls
+    assert "https://apps.apple.com/app/id6504262893" not in urls
+    assert "https://us02web.zoom.us/j/123456789" not in urls
+    assert "https://maps.app.goo.gl/example" not in urls
+
+
+def test_ca_local_source_url_validation_rejects_non_site_targets() -> None:
+    assert is_valid_ca_local_source_url("https://ca-online.org")
+    assert is_valid_ca_local_source_url("https://www.caireland.live")
+    assert not is_valid_ca_local_source_url("https://ca-online.org/events/")
+    assert not is_valid_ca_local_source_url("https://play.google.com/store/apps/details?id=ca")
+    assert not is_valid_ca_local_source_url("https://zoom.us/j/99813522508")
+    assert not is_valid_ca_local_source_url("https://maps.app.goo.gl/eRtvZvAjvpJebo8LA")
 
 
 async def test_ca_discover_stops_at_external_local_site_boundary() -> None:

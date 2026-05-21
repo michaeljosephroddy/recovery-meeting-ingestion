@@ -9,6 +9,11 @@ class CrawlSettings:
     page_timeout_ms: int = 20_000
     action_timeout_ms: int = 5_000
     max_actions_per_page: int = 20
+    stop_after_successful_meeting_page: bool = True
+    successful_meeting_page_min_records: int = 3
+    successful_meeting_page_min_score: float = 0.75
+    local_page_min_extraction_score: float = 0.18
+    deferred_render_timeout_ms: int = 12_000
     save_artifacts: bool = True
     headless: bool = True
 
@@ -119,4 +124,3 @@ def _without_html(page: ScrapedPage) -> dict[str, Any]:
         "screenshot_path": page.screenshot_path,
         "evidence_path": page.evidence_path,
     }
-

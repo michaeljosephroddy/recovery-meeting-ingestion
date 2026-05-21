@@ -4,31 +4,13 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-MEETING_URL_TERMS = {
-    "meeting",
-    "meetings",
-    "find-a-meeting",
-    "find-meeting",
-    "schedule",
-    "where-to-find",
-    "locator",
-}
-MEETING_TEXT_TERMS = {
-    "meeting list",
-    "find a meeting",
-    "meeting finder",
-    "search meetings",
-    "in-person",
-    "online meetings",
-    "today",
-    "monday",
-    "tuesday",
-    "wednesday",
-    "thursday",
-    "friday",
-    "saturday",
-    "sunday",
-}
+from app.scraping.meeting_vocabulary import (
+    DAY_RE,
+    MEETING_TEXT_TERMS,
+    MEETING_URL_TERMS,
+    STRONG_MEETING_PATH_SUFFIXES,
+)
+
 NEGATIVE_TERMS = {
     "donate",
     "donation",
@@ -40,8 +22,19 @@ NEGATIVE_TERMS = {
     "contact",
     "shop",
     "event",
+    "events",
+    "download",
+    "downloads",
+    "form",
+    "forms",
+    "register",
+    "registration",
+    "service meeting",
+    "service-meeting",
+    "service-meetings",
+    "start-a-meeting",
+    "update-register",
 }
-DAY_RE = re.compile(r"\b(mon|tue|wed|thu|fri|sat|sun)(day)?s?\b", re.IGNORECASE)
 TIME_RE = re.compile(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)\b", re.IGNORECASE)
 
 
@@ -53,10 +46,14 @@ class PageScore:
 
 
 def score_link(url: str, text: str = "") -> PageScore:
-    value = f"{urlparse(url).path} {urlparse(url).query} {text}".lower()
+    parsed = urlparse(url)
+    value = f"{parsed.path} {parsed.query} {text}".lower()
     score = 0.0
     signals: list[str] = []
     negative: list[str] = []
+    if _is_strong_public_meeting_directory(parsed.path, parsed.query, text):
+        score += 0.45
+        signals.append("strong_public_meeting_directory")
     for term in MEETING_URL_TERMS:
         if term in value:
             score += 0.25
@@ -67,12 +64,34 @@ def score_link(url: str, text: str = "") -> PageScore:
             signals.append(f"text:{term}")
     for term in NEGATIVE_TERMS:
         if term in value:
-            score -= 0.22
+            score -= 0.35
             negative.append(term)
     return PageScore(
         score=max(0.0, min(1.0, round(score, 2))),
         signals=signals,
         negative_signals=negative,
+    )
+
+
+def _is_strong_public_meeting_directory(path: str, query: str, text: str) -> bool:
+    lowered_path = path.rstrip("/").lower()
+    lowered_query = query.lower()
+    lowered_text = text.lower()
+    if lowered_path.endswith(
+        tuple(STRONG_MEETING_PATH_SUFFIXES)
+    ):
+        return True
+    if "tsml-attendance_option=" in lowered_query or "tsml-type=" in lowered_query:
+        return True
+    return any(
+        term in lowered_text
+        for term in (
+            "find a meeting",
+            "find an online meeting",
+            "find a face-to-face meeting",
+            "meeting schedule",
+            "view all meetings",
+        )
     )
 
 

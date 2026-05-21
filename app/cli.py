@@ -1,8 +1,9 @@
 import asyncio
 from pathlib import Path
-from typing import Annotated, Protocol, runtime_checkable
+from typing import Annotated, Any, Protocol, runtime_checkable
 
 import typer
+from psycopg import Connection
 from rich.console import Console
 
 from app.config import Settings, get_settings
@@ -12,13 +13,18 @@ from app.ingest import IngestResult
 from app.ingest import ingest_source as run_ingest_source
 from app.logging import configure_logging
 from app.review.flags import flag_source_drop
+from app.scraping.artifact_import import (
+    import_artifact_summary,
+    importable_artifact_summaries,
+    source_metadata_by_id,
+)
 from app.scraping.evidence import write_scrape_evidence
 from app.scraping.extract_meetings import extract_meetings_from_html
 from app.scraping.models import CrawlSettings, ScrapedPage, ScrapeSourceResult
 from app.scraping.service import ScrapeResult
 from app.scraping.service import scrape_source as run_scrape_source
 from app.sources.aa_world_services import AaWorldServicesDiscovery
-from app.sources.ca_world_services import CaWorldServicesDiscovery
+from app.sources.ca_world_services import CaWorldServicesDiscovery, is_valid_ca_local_source_url
 from app.sources.na_world_services import NaWorldServicesDiscovery
 from app.sources.registry import (
     AdapterType,
@@ -108,6 +114,54 @@ def discover_sources(
     console.print(f"stored_sources: {len(stored)}")
 
 
+@app.command("clean-ca-sources")
+def clean_ca_sources(
+    dry_run: bool = True,
+    include_with_meetings: Annotated[
+        bool,
+        typer.Option(help="Also delete invalid-looking CA sources that already have meetings."),
+    ] = False,
+) -> None:
+    settings = get_settings()
+    with connect(settings) as connection:
+        repository = SourceRepository(connection)
+        sources = repository.list_sources(fellowship="ca")
+        invalid_sources = [
+            source
+            for source in sources
+            if source.source_type == SourceType.LOCAL_SERVICE_BODY
+            and not is_valid_ca_local_source_url(source.url)
+        ]
+        meeting_counts = _canonical_meeting_counts_by_source(connection, invalid_sources)
+        protected_sources = [
+            source
+            for source in invalid_sources
+            if meeting_counts.get(source.id, 0) > 0 and not include_with_meetings
+        ]
+        protected_source_ids = {source.id for source in protected_sources}
+        deletable_sources = [
+            source for source in invalid_sources if source.id not in protected_source_ids
+        ]
+
+        console.print(f"Clean CA sources dry_run={dry_run}")
+        console.print(f"invalid_sources: {len(invalid_sources)}")
+        console.print(f"protected_with_meetings: {len(protected_sources)}")
+        console.print(f"deletable_sources: {len(deletable_sources)}")
+        for source in deletable_sources[:20]:
+            console.print(f"- {source.id} {source.name} {source.url}")
+        if len(deletable_sources) > 20:
+            console.print(f"... {len(deletable_sources) - 20} more")
+
+        if dry_run:
+            console.print("output: not written because --dry-run was set")
+            return
+
+        deleted = repository.delete_sources([source.id for source in deletable_sources])
+        connection.commit()
+
+    console.print(f"deleted_sources: {deleted}")
+
+
 async def _discover_candidates(
     discovery: SourceDiscovery,
     fixture: Path | None,
@@ -119,6 +173,26 @@ async def _discover_candidates(
         return await discovery.discover(max_locations=max_locations)
     html = await discovery.fetch_html()
     return discovery.parse_html(html)
+
+
+def _canonical_meeting_counts_by_source(
+    connection: Connection[Any],
+    sources: list[Source],
+) -> dict[str, int]:
+    source_ids = [source.id for source in sources]
+    if not source_ids:
+        return {}
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT source_id, COUNT(*)
+            FROM canonical_meetings
+            WHERE source_id = ANY(%(source_ids)s)
+            GROUP BY source_id
+            """,
+            {"source_ids": source_ids},
+        )
+        return {str(source_id): int(count) for source_id, count in cursor.fetchall()}
 
 
 @app.command("ingest-source")
@@ -370,6 +444,82 @@ def debug_scrape_source(
         )
     )
     _print_scrape_result("Debug scrape source", True, source, result)
+
+
+@app.command("import-artifacts")
+def import_artifacts(
+    artifact_dir: Annotated[
+        Path,
+        typer.Argument(help="Scrape artifact run directory or one source summary.json file."),
+    ],
+    dry_run: bool = True,
+    source_id: Annotated[
+        str | None,
+        typer.Option(help="Only import one source ID from the artifact run."),
+    ] = None,
+    include_failed: Annotated[
+        bool,
+        typer.Option(help="Also process summaries whose scrape status is failed."),
+    ] = False,
+) -> None:
+    settings = get_settings()
+    summaries = importable_artifact_summaries(
+        artifact_dir,
+        source_id=source_id,
+        include_failed=include_failed,
+    )
+    metadata = source_metadata_by_id(artifact_dir if artifact_dir.is_dir() else artifact_dir.parent)
+    console.print(f"Import artifacts dry_run={dry_run}")
+    console.print(f"artifact_dir: {artifact_dir}")
+    console.print(f"summaries: {len(summaries)}")
+    totals = {
+        "records_extracted": 0,
+        "records_fetched": 0,
+        "candidates_normalized": 0,
+        "review_flags": 0,
+        "raw_records_stored": 0,
+        "canonical_meetings_upserted": 0,
+    }
+    for summary_path in summaries:
+        result = import_artifact_summary(
+            summary_path,
+            settings,
+            source_metadata=metadata.get(summary_path.parent.name),
+        )
+        totals["records_extracted"] += result.records_extracted
+        totals["records_fetched"] += len(result.ingest.raw_records)
+        totals["candidates_normalized"] += len(result.ingest.candidates)
+        totals["review_flags"] += len(result.ingest.review_flags)
+        console.print(
+            f"- {result.source.id} status={result.scrape_status} pages={result.pages_visited} "
+            f"records={len(result.ingest.raw_records)} "
+            f"candidates={len(result.ingest.candidates)} "
+            f"flags={len(result.ingest.review_flags)}"
+        )
+        if result.error_message:
+            console.print(f"  error={result.error_message}")
+        if dry_run:
+            continue
+        persisted = _persist_ingest_result(settings, result.source, result.ingest)
+        totals["raw_records_stored"] += _int_result(persisted["raw_records_stored"])
+        totals["canonical_meetings_upserted"] += _int_result(
+            persisted["canonical_meetings_upserted"]
+        )
+        console.print(
+            f"  stored={persisted['raw_records_stored']} "
+            f"canonical={persisted['canonical_meetings_upserted']} "
+            f"run={persisted['import_run_id']}"
+        )
+    console.print("Totals")
+    console.print(f"records_extracted: {totals['records_extracted']}")
+    console.print(f"records_fetched: {totals['records_fetched']}")
+    console.print(f"candidates_normalized: {totals['candidates_normalized']}")
+    console.print(f"review_flags: {totals['review_flags']}")
+    if dry_run:
+        console.print("output: not written because --dry-run was set")
+        return
+    console.print(f"raw_records_stored: {totals['raw_records_stored']}")
+    console.print(f"canonical_meetings_upserted: {totals['canonical_meetings_upserted']}")
 
 
 @app.command("classify-sources")
@@ -671,7 +821,11 @@ def _as_browser_scrape_source(source: Source) -> Source:
         }
     return source.model_copy(
         update={
-            "source_type": SourceType.LOCAL_SERVICE_BODY,
+            "source_type": (
+                SourceType.WORLD_SERVICE_LISTING
+                if source.source_type == SourceType.WORLD_SERVICE_LISTING
+                else SourceType.LOCAL_SERVICE_BODY
+            ),
             "adapter_type": AdapterType.PLAYWRIGHT_BROWSER,
             "requires_browser": True,
             "config": config,
@@ -680,12 +834,13 @@ def _as_browser_scrape_source(source: Source) -> Source:
 
 
 def _is_scrapeable_source(source: Source) -> bool:
+    if source.source_type == SourceType.WORLD_SERVICE_LISTING:
+        return source.fellowship == "ca"
     return (
         source.source_type
         not in {
             SourceType.PHONE,
             SourceType.PDF,
-            SourceType.WORLD_SERVICE_LISTING,
         }
         and not source.url.startswith("tel:")
     )
@@ -781,6 +936,14 @@ def _print_persisted_result(result: dict[str, object]) -> None:
     console.print(f"meetings_marked_missing: {result['meetings_marked_missing']}")
     console.print(f"review_flags_created: {result['review_flags_created']}")
     console.print(f"import_run_id: {result['import_run_id']}")
+
+
+def _int_result(value: object) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return int(value)
+    raise TypeError(f"expected integer result, got {type(value).__name__}")
 
 
 if __name__ == "__main__":

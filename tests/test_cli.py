@@ -1,3 +1,5 @@
+import json
+
 from typer.testing import CliRunner
 
 from app.cli import app
@@ -100,3 +102,68 @@ def test_scrape_source_dry_run_uses_html_fixture(tmp_path) -> None:
     assert "records_extracted: 1" in result.output
     assert "candidates_normalized: 1" in result.output
     assert "artifact_dir:" in result.output
+
+
+def test_import_artifacts_dry_run_uses_summary_payload(tmp_path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    source_dir = artifact_root / "aa-example"
+    source_dir.mkdir(parents=True)
+    (artifact_root / "controlled_smoke_report.json").write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {
+                        "source_id": "aa-example",
+                        "fellowship": "aa",
+                        "name": "Example AA",
+                        "url": "https://example.org/meetings",
+                        "country": "IE",
+                        "timezone": "Europe/Dublin",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (source_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "source_id": "aa-example",
+                "source_url": "https://example.org/meetings",
+                "status": "succeeded",
+                "pages_visited": 1,
+                "records_extracted": 1,
+                "pages": [
+                    {
+                        "url": "https://example.org/meetings",
+                        "final_url": "https://example.org/meetings",
+                        "title": "Meetings",
+                        "extracted": [
+                            {
+                                "payload": {
+                                    "name": "Monday Main",
+                                    "day": "Monday",
+                                    "time": "7:30 pm",
+                                    "address_line1": "10 Main Street",
+                                },
+                                "method": "heuristic_table_row",
+                                "confidence": 0.95,
+                                "source_page_url": "https://example.org/meetings",
+                                "signals": ["day", "time", "name"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["import-artifacts", str(artifact_root), "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "summaries: 1" in result.output
+    assert "records_fetched: 1" in result.output
+    assert "candidates_normalized: 1" in result.output
+    assert "not written because --dry-run was set" in result.output

@@ -104,6 +104,16 @@ class SourceRepository:
             row = cursor.fetchone()
         return _source_from_row(dict(row)) if row is not None else None
 
+    def delete_sources(self, source_ids: list[str]) -> int:
+        if not source_ids:
+            return 0
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM sources WHERE id = ANY(%(source_ids)s)",
+                {"source_ids": source_ids},
+            )
+            return cursor.rowcount or 0
+
 
 class RawMeetingRepository:
     def __init__(self, connection: Connection[Any]) -> None:
