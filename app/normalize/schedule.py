@@ -63,6 +63,7 @@ DAY_NAMES = {
     "tirsdag": 2,
     "onsdag": 3,
     "torsdag": 4,
+    "fredag": 5,
     "lørdag": 6,
     "lordag": 6,
     "söndag": 0,

@@ -31,6 +31,7 @@ from app.sources.registry import (
     Source,
     SourceCandidate,
     SourceType,
+    normalize_source_url,
     source_from_candidate,
 )
 from app.sources.site_classification import ClassificationResult, SourceProbeClassifier
@@ -363,16 +364,22 @@ def scrape_all(
         sources = [source for source in sources if source.adapter_type == AdapterType.UNKNOWN]
     if not include_failed:
         sources = [source for source in sources if not _source_last_scrape_failed(source)]
+    shadowed_world_listing_ids = _ca_world_listings_shadowed_by_local_sources(sources)
     scrapeable = [
         _as_browser_scrape_source(source)
         for source in sources
-        if _is_scrapeable_source(source)
+        if _is_scrapeable_source(source) and source.id not in shadowed_world_listing_ids
     ]
     if limit is not None:
         scrapeable = scrapeable[:limit]
 
     console.print(f"Scrape all dry_run={dry_run}")
     console.print(f"sources: {len(scrapeable)}")
+    if shadowed_world_listing_ids:
+        console.print(
+            "skipped_world_service_listings_with_local_sources: "
+            f"{len(shadowed_world_listing_ids)}"
+        )
     crawl_settings = CrawlSettings(
         max_pages_per_source=max_pages_per_source,
         save_artifacts=save_artifacts,
@@ -844,6 +851,33 @@ def _is_scrapeable_source(source: Source) -> bool:
         }
         and not source.url.startswith("tel:")
     )
+
+
+def _ca_world_listings_shadowed_by_local_sources(sources: list[Source]) -> set[str]:
+    local_world_sources = {
+        normalize_source_url(world_source)
+        for source in sources
+        if source.fellowship == "ca"
+        and source.source_type != SourceType.WORLD_SERVICE_LISTING
+        if (world_source := _source_metadata_world_source(source))
+    }
+    return {
+        source.id
+        for source in sources
+        if source.fellowship == "ca"
+        and source.source_type == SourceType.WORLD_SERVICE_LISTING
+        and normalize_source_url(source.url) in local_world_sources
+    }
+
+
+def _source_metadata_world_source(source: Source) -> str | None:
+    metadata = source.config.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    world_source = metadata.get("world_source")
+    if not isinstance(world_source, str):
+        return None
+    return world_source.strip() or None
 
 
 def _source_last_scrape_failed(source: Source) -> bool:

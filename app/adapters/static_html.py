@@ -71,9 +71,17 @@ class StaticHtmlAdapter:
             payload.get("address_line1") or payload.get("city") or payload.get("venue_name")
         )
         has_online = bool(online_url or phone)
-        meeting_type = (
-            "hybrid" if has_address and has_online else "online" if has_online else "in_person"
-        )
+        attendance_option = str(payload.get("attendance_option") or "").lower().replace("_", " ")
+        if "hybrid" in attendance_option:
+            meeting_type = "hybrid"
+        elif "online" in attendance_option:
+            meeting_type = "hybrid" if has_address else "online"
+        elif "in person" in attendance_option or "in-person" in attendance_option:
+            meeting_type = "hybrid" if has_online else "in_person"
+        else:
+            meeting_type = (
+                "hybrid" if has_address and has_online else "online" if has_online else "in_person"
+            )
         return CanonicalMeetingCandidate(
             fellowship=self.source.fellowship,
             source_id=raw.source_id,

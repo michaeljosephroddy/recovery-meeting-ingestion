@@ -1,6 +1,7 @@
+import json
 import re
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
@@ -12,9 +13,18 @@ from app.scraping.models import ExtractedMeeting
 from app.scraping.scoring import confidence_for_payload
 
 TIME_RE = re.compile(
-    r"\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)|"
-    r"(?:[01]?\d|2[0-3]):[0-5]\d|12\s*noon|midnight)"
+    r"\b(?:(?:\d{1,2}(?::|\.|;)?\d{2}|\d{1,2})\s*(?:am|pm|a\.m\.|p\.m\.)|"
+    r"kl\.?\s*(?:[01]?\d|2[0-3])(?:(?::|\.)[0-5]\d)?"
+    r"(?:\s*(?:to|-|–|—)\s*(?:[01]?\d|2[0-3])(?:(?::|\.)[0-5]\d)?)?|"
+    r"(?:[01]?\d|2[0-3]):[0-5]\d"
+    r"(?:\s*(?:to|-|–|—)\s*(?:[01]?\d|2[0-3]):[0-5]\d)?|"
+    r"12\s*noon|midnight)"
     r"(?=\W|$)",
+    re.IGNORECASE,
+)
+TIME_RANGE_TRAILING_MARKER_RE = re.compile(
+    r"\b(?P<start>\d{1,2}(?::|\.|;)\d{2})\s*(?:to|-|–|—)\s*"
+    r"\d{1,2}(?::|\.|;)\d{2}\s*(?P<marker>am|pm|a\.m\.|p\.m\.)\b",
     re.IGNORECASE,
 )
 ADDRESS_RE = re.compile(
@@ -50,6 +60,15 @@ HEADER_MAP = {
     "online_url": {"online", "url", "link", "zoom"},
 }
 TEXT_STRIP_CHARS = " -|–—\u00a0"
+DAY_INDEX_NAMES = {
+    0: "Sunday",
+    1: "Monday",
+    2: "Tuesday",
+    3: "Wednesday",
+    4: "Thursday",
+    5: "Friday",
+    6: "Saturday",
+}
 
 
 def extract_meetings_from_html(
@@ -67,7 +86,12 @@ def extract_meetings_from_html(
     if extracted:
         return extracted
 
+    extracted.extend(_extract_tsml_json(html, source_page_url, page_score))
+    if extracted:
+        return _dedupe_extracted(extracted)
+
     soup = BeautifulSoup(html, "html.parser")
+    extracted.extend(_extract_tsml_tables(soup, source_page_url, page_score))
     extracted.extend(_extract_bmlt_tables(soup, source_page_url, page_score))
     extracted.extend(_extract_tables(soup, source_page_url, page_score))
     extracted.extend(_extract_cards(soup, source_page_url, page_score))
@@ -75,7 +99,11 @@ def extract_meetings_from_html(
     if not extracted:
         extracted.extend(_extract_direct_listing_blocks(soup, source_page_url, page_score))
     if not extracted:
+        extracted.extend(_extract_inline_schedule_lines(soup, source_page_url, page_score))
+    if not extracted:
         extracted.extend(_extract_structured_text_meetings(soup, source_page_url, page_score))
+    if not extracted:
+        extracted.extend(_extract_sequenced_text_meetings(soup, source_page_url, page_score))
     if not extracted:
         extracted.extend(_extract_text_blocks(soup, source_page_url, page_score))
     return _dedupe_extracted(extracted)
@@ -108,6 +136,169 @@ def _extract_configured(
             )
         )
     return meetings
+
+
+def _extract_tsml_json(
+    html: str,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    raw_text = html.strip()
+    if not raw_text.startswith(("[", "{")):
+        soup = BeautifulSoup(html, "html.parser")
+        pre = soup.select_one("pre")
+        raw_text = pre.get_text("", strip=True) if pre else ""
+    if not raw_text.startswith(("[", "{")):
+        return []
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return []
+    records = parsed if isinstance(parsed, list) else parsed.get("meetings")
+    if not isinstance(records, list):
+        return []
+
+    meetings: list[ExtractedMeeting] = []
+    for row_index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        payload = _payload_from_tsml_record(record)
+        payload = _without_empty(payload)
+        if not _looks_like_meeting_payload(payload):
+            continue
+        confidence, signals = confidence_for_payload(
+            payload,
+            method="tsml_json_feed",
+            page_score=max(page_score, 0.9),
+            repeated_structure=True,
+        )
+        meetings.append(
+            ExtractedMeeting(
+                payload={**payload, "row_index": row_index},
+                method="tsml_json_feed",
+                confidence=max(confidence, 0.86),
+                source_page_url=source_page_url,
+                signals=signals,
+                selector_hint="tsml_json",
+            )
+        )
+    return meetings
+
+
+def _payload_from_tsml_record(record: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if source_record_id := _optional_text(record.get("id") or record.get("slug")):
+        payload["source_record_id"] = source_record_id
+    if name := _optional_text(record.get("name")):
+        payload["name"] = name
+    if day := _day_name_from_index(record.get("day")):
+        payload["day"] = day
+    if time := _optional_text(record.get("time_formatted") or record.get("time")):
+        payload["time"] = _normalize_extracted_time(time)
+    if venue := _optional_text(record.get("location")):
+        payload["venue_name"] = venue
+    if address := _optional_text(record.get("formatted_address") or record.get("address")):
+        payload["address_line1"] = address
+    if city := _optional_text(record.get("city")):
+        payload["city"] = city
+    if region := _optional_text(record.get("region")):
+        payload["region"] = region
+    if timezone := _optional_text(record.get("timezone")):
+        payload["timezone"] = timezone
+    if latitude := _optional_text(record.get("latitude")):
+        payload["latitude"] = latitude
+    if longitude := _optional_text(record.get("longitude")):
+        payload["longitude"] = longitude
+    if online_url := _optional_text(record.get("conference_url")):
+        payload["online_url"] = online_url
+    notes = [
+        value
+        for value in (
+            _optional_text(record.get("conference_url_notes")),
+            _optional_text(record.get("notes")),
+        )
+        if value
+    ]
+    if notes:
+        payload["phone_join_info"] = " ".join(notes)
+    if types := record.get("types"):
+        payload["formats"] = ", ".join(str(item).strip() for item in types if str(item).strip())
+    if attendance := _optional_text(record.get("attendance_option")):
+        payload["attendance_option"] = attendance.replace("_", " ")
+    return payload
+
+
+def _extract_tsml_tables(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    meetings: list[ExtractedMeeting] = []
+    for table_index, table in enumerate(soup.select("table")):
+        if not table.select_one("tbody#meetings_tbody, tr[class*='attendance-']"):
+            continue
+        for row_index, row in enumerate(table.select("tbody tr")):
+            if not isinstance(row, Tag):
+                continue
+            payload = _payload_from_tsml_table_row(row, source_page_url)
+            payload = _without_empty(payload)
+            if not _looks_like_meeting_payload(payload):
+                continue
+            confidence, signals = confidence_for_payload(
+                payload,
+                method="tsml_rendered_table_row",
+                page_score=page_score,
+                repeated_structure=True,
+                table_headers=True,
+            )
+            meetings.append(
+                ExtractedMeeting(
+                    payload={**payload, "row_index": row_index},
+                    method="tsml_rendered_table_row",
+                    confidence=max(confidence, 0.82),
+                    source_page_url=source_page_url,
+                    signals=signals,
+                    selector_hint=f"table:nth-of-type({table_index + 1}) tr",
+                )
+            )
+    return meetings
+
+
+def _payload_from_tsml_table_row(row: Tag, source_page_url: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    time_cell = row.select_one("td.time")
+    if time_cell is not None:
+        sort_value = str(time_cell.get("data-sort") or "")
+        if day := _day_name_from_tsml_sort(sort_value):
+            payload["day"] = day
+        time_text = _clean_text(time_cell)
+        if time := _first_time_match(time_text) or _time_from_tsml_sort(sort_value):
+            payload["time"] = _normalize_extracted_time(time)
+
+    name_cell = row.select_one("td.name")
+    if name_cell is not None:
+        if name := _clean_text(name_cell):
+            payload["name"] = name
+        link = name_cell.select_one("a[href]")
+        if link and (href := link.get("href")):
+            meeting_url = urljoin(source_page_url, str(href))
+            if source_record_id := _source_record_id_from_meeting_url(meeting_url):
+                payload["source_record_id"] = source_record_id
+
+    location_cell = row.select_one("td.location, td.location_group")
+    if location_cell is not None:
+        if location := _first_text(location_cell, ".location-name"):
+            payload["venue_name"] = location
+        if attendance := _tsml_attendance_option(row, location_cell):
+            payload["attendance_option"] = attendance
+
+    if (address_cell := row.select_one("td.address")) and (address := _clean_text(address_cell)):
+        payload["address_line1"] = address
+    if (region_cell := row.select_one("td.region")) and (region := _clean_text(region_cell)):
+        payload["region"] = region
+    if (types_cell := row.select_one("td.types")) and (types := _clean_text(types_cell)):
+        payload["formats"] = types
+    return payload
 
 
 def _extract_tables(
@@ -181,9 +372,9 @@ def _extract_bmlt_tables(
                     payload["day"] = day
             if time_text := _first_text(cells[0], ".bmlt-time-2, .bmlt-time"):
                 start_time = time_text.split("-", 1)[0].strip()
-                if time := _first_match(TIME_RE, start_time):
+                if time := _first_time_match(start_time):
                     payload["time"] = _normalize_extracted_time(time)
-            elif time := _first_match(TIME_RE, _clean_text(cells[0])):
+            elif time := _first_time_match(_clean_text(cells[0])):
                 payload["time"] = _normalize_extracted_time(time)
             if formats := str(row.get("data-formats") or "").replace("-", " ").strip():
                 payload["formats"] = formats
@@ -297,7 +488,7 @@ def _extract_day_sections(
     page_score: float,
 ) -> list[ExtractedMeeting]:
     meetings: list[ExtractedMeeting] = []
-    containers = soup.select(".entry-content, article, main")
+    containers = soup.select(".entry-content, article, main, .panel")
     for container_index, container in enumerate(containers):
         lines = _day_section_lines(container)
         if not lines:
@@ -318,7 +509,7 @@ def _extract_day_sections(
                 pending_name = None
                 current_day = day_heading
                 continue
-            time = _first_match(TIME_RE, line)
+            time = _first_time_match(line)
             if time and current_day:
                 if pending is not None:
                     _append_pending_day_section(
@@ -353,6 +544,98 @@ def _extract_day_sections(
                 meetings, pending, source_page_url, page_score, container_index, row_index
             )
     return meetings
+
+
+def _extract_inline_schedule_lines(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    meetings: list[ExtractedMeeting] = []
+    containers = soup.select(".entry-content, article, main") or [soup]
+    row_index = 0
+    for container_index, container in enumerate(containers):
+        for line in _day_section_lines(container):
+            if len(line) > 500 or not (DAY_RE.search(line) and TIME_RE.search(line)):
+                continue
+            payloads = _payloads_from_inline_schedule_line(line)
+            repeated_structure = len(payloads) > 1
+            for payload in payloads:
+                payload = _without_empty(payload)
+                if not _looks_like_meeting_payload(payload):
+                    continue
+                confidence, signals = confidence_for_payload(
+                    payload,
+                    method="heuristic_inline_schedule",
+                    page_score=page_score,
+                    repeated_structure=repeated_structure,
+                )
+                meetings.append(
+                    ExtractedMeeting(
+                        payload={**payload, "row_index": row_index},
+                        method="heuristic_inline_schedule",
+                        confidence=confidence,
+                        source_page_url=source_page_url,
+                        signals=signals,
+                        selector_hint=f"inline_schedule:{container_index}",
+                    )
+                )
+                row_index += 1
+    return meetings
+
+
+def _payloads_from_inline_schedule_line(line: str) -> list[dict[str, str]]:
+    day_matches = list(DAY_RE.finditer(line))
+    if not day_matches:
+        return []
+    first_day = day_matches[0]
+    name = _clean_meeting_name_line(line[: first_day.start()])
+    if not name:
+        return []
+    payloads: list[dict[str, str]] = []
+    last_time_end: int | None = None
+    for index, day_match in enumerate(day_matches):
+        next_day_start = (
+            day_matches[index + 1].start()
+            if index + 1 < len(day_matches)
+            else len(line)
+        )
+        segment = line[day_match.end() : next_day_start]
+        time = _first_time_match(segment)
+        if not time:
+            continue
+        absolute_time_end = day_match.end() + segment.find(time) + len(time)
+        last_time_end = (
+            absolute_time_end
+            if last_time_end is None
+            else max(last_time_end, absolute_time_end)
+        )
+        payloads.append(
+            {
+                "name": name,
+                "day": _day_from_schedule_line(day_match.group(0)) or day_match.group(0).title(),
+                "time": _normalize_extracted_time(time),
+            }
+        )
+    if not payloads or last_time_end is None:
+        return []
+    tail = _clean_inline_schedule_tail(line[last_time_end:])
+    if tail:
+        for payload in payloads:
+            for detail in _inline_schedule_detail_lines(tail):
+                _merge_day_section_line(payload, detail)
+    return payloads
+
+
+def _clean_inline_schedule_tail(text: str) -> str:
+    cleaned = re.sub(r"^\s*\([^)]*\)\s*", "", text).strip(TEXT_STRIP_CHARS)
+    cleaned = re.sub(r"\bse kart nederst\b", "", cleaned, flags=re.IGNORECASE)
+    return _clean_fragment(cleaned)
+
+
+def _inline_schedule_detail_lines(text: str) -> list[str]:
+    parts = [part.strip() for part in re.split(r"\s+(?=https?://)", text) if part.strip()]
+    return parts or [text]
 
 
 def _extract_text_blocks(
@@ -439,6 +722,55 @@ def _extract_structured_text_meetings(
     return meetings
 
 
+def _extract_sequenced_text_meetings(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    if soup.select_one("[data-rendered-text-fallback]") is None:
+        return []
+    lines = [_clean_fragment(line) for line in soup.get_text("\n", strip=True).splitlines()]
+    lines = [line for line in lines if line and line != "\u200b"]
+    meetings: list[ExtractedMeeting] = []
+    row_index = 0
+    for index, line in enumerate(lines):
+        day = _day_from_schedule_line(line)
+        time = _first_time_match(line)
+        if not day or not time:
+            continue
+        name = _previous_sequence_name(lines, index)
+        if not name:
+            continue
+        payload: dict[str, Any] = {
+            "name": name,
+            "day": day,
+            "time": _normalize_extracted_time(time),
+        }
+        for detail in _sequence_detail_lines(lines, index + 1):
+            _merge_sequence_detail_line(payload, detail)
+        payload = _without_empty(payload)
+        if not _looks_like_meeting_payload(payload):
+            continue
+        confidence, signals = confidence_for_payload(
+            payload,
+            method="heuristic_sequence_text",
+            page_score=page_score,
+            repeated_structure=True,
+        )
+        meetings.append(
+            ExtractedMeeting(
+                payload={**payload, "row_index": row_index},
+                method="heuristic_sequence_text",
+                confidence=confidence,
+                source_page_url=source_page_url,
+                signals=signals,
+                selector_hint="sequence_text",
+            )
+        )
+        row_index += 1
+    return meetings
+
+
 def _extract_direct_listing_blocks(
     soup: BeautifulSoup,
     source_page_url: str,
@@ -448,11 +780,52 @@ def _extract_direct_listing_blocks(
     containers = soup.select(".entry-content, article, main") or [soup]
     for container_index, container in enumerate(containers):
         section_name: str | None = None
+        pending_day_payload: dict[str, str] | None = None
         for row_index, paragraph in enumerate(container.select("p")):
             text = _clean_text(paragraph)
             if not text:
                 continue
-            if not (DAY_RE.search(text) and TIME_RE.search(text)):
+            has_day = bool(DAY_RE.search(text))
+            has_time = bool(TIME_RE.search(text))
+            if pending_day_payload and has_time and not has_day:
+                payload = _payload_from_direct_listing_paragraph(
+                    paragraph,
+                    pending_day_payload.get("name") or section_name,
+                    source_page_url,
+                )
+                payload["day"] = pending_day_payload["day"]
+                for detail in _direct_listing_following_detail_lines(paragraph):
+                    _merge_direct_listing_line(payload, detail)
+                pending_day_payload = None
+                payload = _without_empty(payload)
+                if not _looks_like_meeting_payload(payload):
+                    continue
+                confidence, signals = confidence_for_payload(
+                    payload,
+                    method="heuristic_direct_listing",
+                    page_score=page_score,
+                    repeated_structure=True,
+                )
+                meetings.append(
+                    ExtractedMeeting(
+                        payload={**payload, "row_index": row_index},
+                        method="heuristic_direct_listing",
+                        confidence=confidence,
+                        source_page_url=source_page_url,
+                        signals=signals,
+                        selector_hint=f"direct_listing:{container_index}",
+                    )
+                )
+                continue
+            if not (has_day and has_time):
+                if has_day and (day := _day_from_schedule_line(text)):
+                    pending_day_payload = {
+                        "day": day,
+                        "name": _direct_listing_name(paragraph, section_name)
+                        or _clean_meeting_name_line(text)
+                        or "",
+                    }
+                    continue
                 section_name = _direct_listing_section_name(paragraph) or section_name
                 continue
             payload = _payload_from_direct_listing_paragraph(
@@ -460,6 +833,8 @@ def _extract_direct_listing_blocks(
                 section_name,
                 source_page_url,
             )
+            for detail in _direct_listing_following_detail_lines(paragraph):
+                _merge_direct_listing_line(payload, detail)
             payload = _without_empty(payload)
             if not _looks_like_meeting_payload(payload):
                 continue
@@ -511,7 +886,7 @@ def _enrich_table_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if time_value:
         if not enriched.get("day") and (day := _first_match(DAY_RE, time_value)):
             enriched["day"] = day
-        if time := _first_match(TIME_RE, time_value):
+        if time := _first_time_match(time_value):
             enriched["time"] = _normalize_extracted_time(time)
     address = str(enriched.get("address_line1") or "").strip()
     if address.lower() in {"zoom", "zoom meeting", "phone", "telephone", "online"}:
@@ -531,7 +906,7 @@ def _payload_from_text(text: str) -> dict[str, str]:
             if _clean_fragment(part)
         ]
     day = _first_match(DAY_RE, text)
-    time = _first_match(TIME_RE, text)
+    time = _first_time_match(text)
     payload: dict[str, str] = {}
     if day:
         payload["day"] = day
@@ -571,7 +946,7 @@ def _payload_from_direct_listing_paragraph(
 ) -> dict[str, str]:
     text = paragraph.get_text("\n", strip=True)
     day = _first_match(DAY_RE, text)
-    time = _first_match(TIME_RE, text)
+    time = _first_time_match(text)
     payload: dict[str, str] = {}
     if day:
         payload["day"] = day
@@ -603,6 +978,36 @@ def _payload_from_direct_listing_paragraph(
             payload.setdefault("address_line1", link_text)
 
     return payload
+
+
+def _direct_listing_following_detail_lines(paragraph: Tag) -> list[str]:
+    details: list[str] = []
+    for sibling in paragraph.find_next_siblings():
+        if not isinstance(sibling, Tag):
+            continue
+        if sibling.name != "p":
+            break
+        text = _clean_text(sibling)
+        if not text:
+            continue
+        if _direct_listing_starts_new_schedule(text):
+            break
+        details.extend(
+            line
+            for line in (
+                _clean_fragment(part) for part in sibling.get_text("\n", strip=True).splitlines()
+            )
+            if line and not _is_non_meeting_detail_line(line)
+        )
+    return details
+
+
+def _direct_listing_starts_new_schedule(text: str) -> bool:
+    if not DAY_RE.search(text):
+        return False
+    if TIME_RE.search(text):
+        return True
+    return len(text.split()) <= 5 and len(text) <= 80
 
 
 def _payload_from_structured_text_block(lines: list[str]) -> dict[str, str]:
@@ -648,7 +1053,7 @@ def _day_section_lines(container: Tag) -> list[str]:
 
 
 def _day_from_title(container: Tag | BeautifulSoup) -> str | None:
-    title = container.select_one("h1, h2, h3, title")
+    title = container.select_one("h1, h2, h3, title, .panel-title, .wb-accordion-title")
     if title is None:
         return None
     return _day_heading_or_none(_clean_text(title))
@@ -685,6 +1090,8 @@ def _merge_day_section_line(payload: dict[str, Any], line: str) -> None:
     if _is_timezone_only_line(line):
         return
     lowered = line.lower()
+    if (url := _first_url(line)) and (online_url := _meeting_url_or_none(url)):
+        payload.setdefault("online_url", online_url)
     if (
         "zoom" in lowered
         or "meeting id" in lowered
@@ -700,12 +1107,26 @@ def _merge_day_section_line(payload: dict[str, Any], line: str) -> None:
         return
     if str(payload.get("name") or "").lower() == line.lower():
         return
+    if lowered.startswith("location:"):
+        location = _clean_fragment(line.split(":", 1)[1])
+        if not location:
+            return
+        if ADDRESS_RE.search(location) or _looks_like_address_fallback(location):
+            payload.setdefault("address_line1", location)
+        else:
+            payload.setdefault("venue_name", location)
+        return
     if lowered.startswith(("adres:", "adres :")):
         address = _clean_fragment(re.sub(r"^adres\s*:?\s*", "", line, flags=re.IGNORECASE))
         if address:
             payload.setdefault("address_line1", address)
         return
+    if line.startswith(("http://", "https://")) and payload.get("online_url"):
+        return
     if ADDRESS_RE.search(line):
+        payload.setdefault("address_line1", line)
+        return
+    if _looks_like_address_fallback(line):
         payload.setdefault("address_line1", line)
         return
     if payload.get("address_line1") and not payload.get("city") and _looks_like_city_line(line):
@@ -745,6 +1166,7 @@ def _looks_like_next_meeting_name(line: str) -> bool:
 
 def _clean_meeting_name_line(line: str) -> str:
     cleaned = _clean_fragment(line)
+    cleaned = cleaned.replace("\u200b", "")
     cleaned = re.sub(r"^(grupa|group)\s+", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.replace("“", "").replace("”", "").replace("„", "").replace('"', "")
     cleaned = re.sub(r"\((?:mityng|miting|meeting)[^)]+\)", "", cleaned, flags=re.IGNORECASE)
@@ -775,14 +1197,39 @@ def _clean_schedule_remainder(text: str) -> str:
 def _clean_direct_listing_time_remainder(line: str, time: str) -> str:
     remainder = _clean_fragment(line.replace(time, "", 1))
     remainder = _clean_fragment(DAY_RE.sub("", remainder, count=1))
+    remainder = re.sub(r"\s+", " ", remainder).strip(TEXT_STRIP_CHARS)
     remainder = re.sub(
-        r"^[–—-]?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?\s*[–—-]?\s*",
+        r"^(?:time\s*:|every\s+at|every|at)\s*",
         "",
         remainder,
         flags=re.IGNORECASE,
     )
     remainder = re.sub(
-        r"^[|–—-]+\s*\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?\s*",
+        r"^[–—-]?\s*(?:\d{1,2}(?::|\.|;)\d{2}|\d{3,4}|\d{1,2})"
+        r"\s*(?:am|pm|a\.m\.|p\.m\.)?\s*(?:to|-|–|—)\s*"
+        r"(?:\d{1,2}(?::|\.|;)\d{2}|\d{3,4}|\d{1,2})"
+        r"\s*(?:am|pm|a\.m\.|p\.m\.)?\s*[–—-]?\s*",
+        "",
+        remainder,
+        flags=re.IGNORECASE,
+    )
+    remainder = re.sub(
+        r"^[–—-]?\s*(?:\d{1,2}(?::|\.|;)?\d{2}|\d{1,2})"
+        r"\s*(?:am|pm|a\.m\.|p\.m\.)?\s*[–—-]?\s*",
+        "",
+        remainder,
+        flags=re.IGNORECASE,
+    )
+    remainder = re.sub(
+        r"^[|–—-]+\s*(?:\d{1,2}(?::|\.|;)?\d{2}|\d{1,2})"
+        r"\s*(?:am|pm|a\.m\.|p\.m\.)?\s*",
+        "",
+        remainder,
+        flags=re.IGNORECASE,
+    )
+    remainder = re.sub(
+        r"\bto\s*(?:\d{1,2}(?::|\.|;)?\d{2}|\d{1,2})"
+        r"\s*(?:am|pm|a\.m\.|p\.m\.)?\b",
         "",
         remainder,
         flags=re.IGNORECASE,
@@ -810,11 +1257,16 @@ def _direct_listing_name(paragraph: Tag, section_name: str | None) -> str | None
 
 
 def _merge_direct_listing_line(payload: dict[str, str], line: str) -> None:
+    if _is_non_meeting_detail_line(line):
+        return
     lowered = line.lower()
     if str(payload.get("name") or "").lower() == lowered:
         return
     if lowered.startswith("city "):
         payload.setdefault("city", _clean_fragment(line[5:]))
+        return
+    if _is_connection_line(line) or lowered.startswith(("contact", "phone", "tel", "whatsapp")):
+        _merge_day_section_line(payload, line)
         return
     if _looks_like_address_fallback(line):
         payload.setdefault("address_line1", line)
@@ -836,7 +1288,7 @@ def _is_structured_text_meeting_start(lines: list[str], index: int) -> bool:
     return bool(
         index + 2 < len(lines)
         and _structured_text_day(lines[index + 1])
-        and _first_match(TIME_RE, lines[index + 2])
+        and _first_time_match(lines[index + 2])
     )
 
 
@@ -851,6 +1303,98 @@ def _structured_text_day(line: str) -> str:
     cleaned = re.sub(r"^\(\d+\)\s*", "", line).strip()
     day = _first_match(DAY_RE, cleaned)
     return day or ""
+
+
+def _day_from_schedule_line(line: str) -> str | None:
+    if day := _first_match(DAY_RE, line):
+        return day.rstrip("s").title()
+    match = re.search(
+        r"\b(sundays|mondays|tuesdays|wednesdays|thursdays|fridays|saturdays)\b",
+        line,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return match.group(1).removesuffix("s").title()
+
+
+def _previous_sequence_name(lines: list[str], schedule_index: int) -> str | None:
+    for index in range(schedule_index - 1, max(-1, schedule_index - 6), -1):
+        candidate = _clean_meeting_name_line(lines[index])
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if lowered in {
+            "meetings",
+            "meeting",
+            "new meeting",
+            "more info",
+            "our services",
+            "trusted servant",
+        }:
+            continue
+        if lowered.isdigit() or _looks_like_address_fallback(candidate):
+            continue
+        if TIME_RE.search(candidate) or _day_from_schedule_line(candidate):
+            continue
+        if _is_instruction_line(candidate) or _is_ignored_detail_line(candidate):
+            continue
+        if any(term in lowered for term in ("zoom link", "click here", "hybrid meetings")):
+            continue
+        return candidate
+    return None
+
+
+def _sequence_detail_lines(lines: list[str], start_index: int) -> list[str]:
+    details: list[str] = []
+    stop_terms = {
+        "more info",
+        "our services",
+        "the 12 traditions",
+        "all hybrid meetings are available through the following",
+    }
+    for index, line in enumerate(lines[start_index : start_index + 10], start=start_index):
+        cleaned = _clean_fragment(line)
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if _day_from_schedule_line(cleaned) and TIME_RE.search(cleaned):
+            break
+        if lowered in stop_terms:
+            break
+        next_line = lines[index + 1] if index + 1 < len(lines) else ""
+        if _looks_like_next_meeting_name(cleaned) and (
+            _day_from_schedule_line(next_line) and TIME_RE.search(next_line)
+        ):
+            break
+        if lowered.isdigit():
+            break
+        details.append(cleaned)
+    return details
+
+
+def _merge_sequence_detail_line(payload: dict[str, Any], line: str) -> None:
+    lowered = line.lower()
+    if lowered.startswith("begins "):
+        return
+    if lowered in {"(in person)", "in person", "online", "hybrid"}:
+        payload.setdefault("attendance_option", line.strip("()"))
+        return
+    if re.fullmatch(r"(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}", line):
+        existing = str(payload.get("phone_join_info") or "")
+        payload["phone_join_info"] = " ".join(part for part in (existing, line) if part).strip()
+        return
+    if (
+        payload.get("address_line1")
+        and not payload.get("city")
+        and _looks_like_postal_city_line(line)
+    ):
+        payload["city"] = line
+        return
+    if not payload.get("address_line1") and not payload.get("city") and _looks_like_city_line(line):
+        payload["city"] = line
+        return
+    _merge_day_section_line(payload, line)
 
 
 def _is_placeholder_line(line: str) -> bool:
@@ -912,6 +1456,21 @@ def _is_ignored_detail_line(line: str) -> bool:
     return lowered in {"aktywny", "aktywny link", "link", "adres:", "adres :"}
 
 
+def _is_non_meeting_detail_line(line: str) -> bool:
+    lowered = line.lower().strip()
+    if NON_MEETING_URL_RE.search(line):
+        return True
+    return any(
+        phrase in lowered
+        for phrase in (
+            "a twelve step fellowship",
+            "addicts seeking recovery",
+            "copyright",
+            "privacy policy",
+        )
+    )
+
+
 def _looks_like_format_text(text: str) -> bool:
     compact = re.sub(r"[\s/|.()-]", "", text).lower()
     letters = [char for char in text if char.isalpha()]
@@ -927,6 +1486,8 @@ def _looks_like_city_line(text: str) -> bool:
         term in lowered
         for term in (
             "book",
+            "club",
+            "clubhouse",
             "meeting",
             "newcomer",
             "passcode",
@@ -939,6 +1500,17 @@ def _looks_like_city_line(text: str) -> bool:
     ):
         return False
     return not any(char.isdigit() for char in text) and len(text.split()) <= 4
+
+
+def _looks_like_postal_city_line(text: str) -> bool:
+    if "@" in text:
+        return False
+    return bool(
+        re.fullmatch(
+            r"[A-Za-z'.\s-]+,\s*[A-Z]{2}(?:\s+[A-Z0-9 -]{3,10})?",
+            text.strip(),
+        )
+    )
 
 
 def _clean_fragment(text: str) -> str:
@@ -982,18 +1554,101 @@ def _meeting_url_or_none(url: str) -> str | None:
     return None
 
 
+def _first_url(text: str) -> str | None:
+    match = re.search(r"https?://\S+", text)
+    return match.group(0) if match else None
+
+
 def _normalize_extracted_time(time: str) -> str:
-    lowered = time.lower().strip()
+    stripped = time.strip()
+    lowered = stripped.lower()
     if lowered == "12 noon":
         return "12:00 pm"
     if lowered == "midnight":
         return "12:00 am"
-    return time
+    stripped = re.sub(r"^kl\.?\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(
+        r"\s*(?:to|-|–|—)\s*\d{1,2}(?:(?::|\.)\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?\s*$",
+        "",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"\b([ap])\.m\.?\b", r"\1m", stripped, flags=re.IGNORECASE)
+    normalized = re.sub(
+        r"(?<=\d)(?:\.|;)(?=\d{2}\s*(?:am|pm)?\b)",
+        ":",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    compact = re.fullmatch(r"(\d{3,4})\s*(am|pm)", normalized, flags=re.IGNORECASE)
+    if compact is not None:
+        digits = compact.group(1)
+        return f"{int(digits[:-2])}:{digits[-2:]}{compact.group(2).lower()}"
+    if re.fullmatch(r"(?:[01]?\d|2[0-3])", normalized):
+        return f"{int(normalized)}:00"
+    return normalized
+
+
+def _day_name_from_index(value: object) -> str | None:
+    try:
+        day = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return DAY_INDEX_NAMES.get(day)
+
+
+def _day_name_from_tsml_sort(value: str) -> str | None:
+    match = re.match(r"\s*([0-6])-", value)
+    if match is None:
+        return None
+    return DAY_INDEX_NAMES.get(int(match.group(1)))
+
+
+def _time_from_tsml_sort(value: str) -> str | None:
+    match = re.match(r"\s*[0-6]-(\d{1,2}:\d{2})", value)
+    return match.group(1) if match else None
+
+
+def _source_record_id_from_meeting_url(url: str) -> str | None:
+    path = urlparse(url).path.strip("/")
+    parts = [part for part in path.split("/") if part]
+    if len(parts) >= 2 and parts[-2] == "meetings":
+        return parts[-1]
+    return None
+
+
+def _tsml_attendance_option(row: Tag, location_cell: Tag) -> str | None:
+    classes = {
+        str(class_name)
+        for tag in (row, location_cell)
+        for class_name in (tag.get("class") or [])
+    }
+    if "attendance-hybrid" in classes:
+        return "hybrid"
+    if "attendance-online" in classes:
+        return "online"
+    if "attendance-in_person" in classes:
+        return "in person"
+    return None
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _first_match(pattern: re.Pattern[str], text: str) -> str | None:
     match = pattern.search(text)
     return match.group(0) if match else None
+
+
+def _first_time_match(text: str) -> str | None:
+    range_match = TIME_RANGE_TRAILING_MARKER_RE.search(text)
+    if range_match is not None:
+        return f"{range_match.group('start')}{range_match.group('marker')}"
+    return _first_match(TIME_RE, text)
 
 
 def _first_text(tag: Tag, selector: str) -> str | None:

@@ -6,7 +6,7 @@ from hashlib import sha1
 from html import escape
 from pathlib import Path
 from typing import Any
-from urllib.parse import urldefrag, urljoin, urlparse
+from urllib.parse import parse_qsl, urldefrag, urlencode, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
@@ -19,8 +19,14 @@ from app.scraping.interactions import (
     perform_configured_actions,
     perform_heuristic_interactions,
 )
-from app.scraping.meeting_page_detector import score_html, score_link
-from app.scraping.models import CrawlSettings, ScrapedPage, ScrapeSourceResult
+from app.scraping.meeting_page_detector import PageScore, score_html, score_link
+from app.scraping.models import (
+    BrowserActionTrace,
+    CrawlSettings,
+    ExtractedMeeting,
+    ScrapedPage,
+    ScrapeSourceResult,
+)
 from app.sources.registry import Source, SourceType
 
 SKIP_PATH_SUFFIXES = (
@@ -99,6 +105,7 @@ class BrowserCrawler:
                 common_meeting_paths_enqueued = False
                 broad_fallback_allowed = False
                 broad_fallback_enqueued = False
+                guessed_common_not_found_count = 0
                 broad_fallback: list[dict[str, str]] = []
                 while queue and len(pages) < self.settings.max_pages_per_source:
                     url, depth = queue.popleft()
@@ -116,14 +123,38 @@ class BrowserCrawler:
                         continue
                     visited_final.add(final_normalized)
                     pages.append(scraped)
-                    if should_stop_after_page(scraped, self.settings):
-                        break
+                    if (
+                        broad_fallback_allowed
+                        and is_common_meeting_path(self.source.url, normalized)
+                        and _looks_like_not_found_page(scraped)
+                        and not scraped.extracted
+                    ):
+                        guessed_common_not_found_count += 1
+                        if guessed_common_not_found_count >= 2:
+                            queue = _without_common_meeting_path_links(queue, self.source.url)
+                            broad_fallback_enqueued = True
+                            broad_fallback = []
                     if self.source.source_type == SourceType.WORLD_SERVICE_LISTING:
+                        if should_stop_after_page(scraped, self.settings):
+                            break
                         continue
                     if depth >= self.settings.max_depth:
+                        if should_stop_after_page(
+                            scraped,
+                            self.settings,
+                            pending_queue=queue,
+                        ):
+                            break
                         continue
                     links = await _page_links(page, scraped.final_url)
                     prioritized = prioritize_links(self.source.url, links)
+                    if should_stop_after_page(
+                        scraped,
+                        self.settings,
+                        prioritized_links=prioritized,
+                        pending_queue=queue,
+                    ):
+                        break
                     if prioritized:
                         for link in prioritized:
                             link_url = normalize_crawl_url(link["url"])
@@ -199,11 +230,50 @@ class BrowserCrawler:
         if wix_collection_text := await _wix_dynamic_collection_text(page):
             html = _html_with_rendered_text(html, wix_collection_text)
         page_score = score_html(final_url, html)
-        extracted = extract_meetings_from_html(
-            html,
-            source_page_url=final_url,
-            source_config=self.source.config,
-        )
+        extracted: list[ExtractedMeeting] = []
+        tsml_feed_url = _tsml_json_feed_url_from_html(html, final_url)
+        if (
+            tsml_feed_url is not None
+            and self.source.source_type != SourceType.WORLD_SERVICE_LISTING
+            and (
+                is_allowed_url(self.source.url, tsml_feed_url)
+                or _looks_like_tsml_json_feed_url(tsml_feed_url)
+            )
+        ):
+            feed_html = await _fetch_json_feed_text(page, tsml_feed_url)
+            if feed_html:
+                feed_extracted = extract_meetings_from_html(
+                    feed_html,
+                    source_page_url=tsml_feed_url,
+                    source_config=self.source.config,
+                )
+                if feed_extracted:
+                    feed_score = score_html(tsml_feed_url, feed_html)
+                    traces.append(
+                        BrowserActionTrace(
+                            action="tsml_json_feed",
+                            selector="link[rel~='alternate'][type='application/json']",
+                            value=tsml_feed_url,
+                            status="succeeded",
+                            message=f"extracted {len(feed_extracted)} records",
+                        )
+                    )
+                    html = feed_html
+                    final_url = tsml_feed_url
+                    page_score = PageScore(
+                        score=max(page_score.score, feed_score.score, 0.9),
+                        signals=_dedupe_strings(
+                            [*page_score.signals, *feed_score.signals, "tsml_json_feed"]
+                        ),
+                        negative_signals=feed_score.negative_signals,
+                    )
+                    extracted = feed_extracted
+        if not extracted:
+            extracted = extract_meetings_from_html(
+                html,
+                source_page_url=final_url,
+                source_config=self.source.config,
+            )
         if not extracted and body_text.strip():
             rendered_html = _html_with_rendered_text(html, body_text)
             rendered_page_score = score_html(final_url, rendered_html)
@@ -270,13 +340,32 @@ def common_meeting_path_links(source_url: str) -> list[dict[str, str]]:
     root_url = f"{parsed.scheme}://{parsed.netloc}/"
     links: list[dict[str, str]] = []
     seen = {normalize_crawl_url(source_url)}
+    seen_paths = {_normalized_path_key(source_url)}
     for path in COMMON_MEETING_PATHS:
         candidate_url = normalize_crawl_url(urljoin(root_url, path))
-        if candidate_url in seen or not is_allowed_url(source_url, candidate_url):
+        path_key = _normalized_path_key(candidate_url)
+        if (
+            candidate_url in seen
+            or path_key in seen_paths
+            or not is_allowed_url(source_url, candidate_url)
+        ):
             continue
         seen.add(candidate_url)
+        seen_paths.add(path_key)
         links.append({"url": candidate_url, "text": path.strip("/").replace("-", " ")})
     return links
+
+
+def is_common_meeting_path(source_url: str, candidate_url: str) -> bool:
+    source = urlparse(source_url)
+    candidate = urlparse(candidate_url)
+    if candidate.hostname != source.hostname:
+        return False
+    common_keys = {
+        _normalized_path_key(urljoin(f"{source.scheme}://{source.netloc}/", path))
+        for path in COMMON_MEETING_PATHS
+    }
+    return _normalized_path_key(candidate_url) in common_keys
 
 
 def is_allowed_url(source_url: str, candidate_url: str) -> bool:
@@ -292,6 +381,41 @@ def is_allowed_url(source_url: str, candidate_url: str) -> bool:
     source_root = ".".join(source_host.split(".")[-2:])
     candidate_root = ".".join(candidate_host.split(".")[-2:])
     return bool(source_root and source_root == candidate_root)
+
+
+def _normalized_path_key(url: str) -> str:
+    path = urlparse(url).path or "/"
+    return path.rstrip("/").lower() or "/"
+
+
+def _without_common_meeting_path_links(
+    queue: deque[tuple[str, int]],
+    source_url: str,
+) -> deque[tuple[str, int]]:
+    return deque(
+        (url, depth)
+        for url, depth in queue
+        if not is_common_meeting_path(source_url, normalize_crawl_url(url))
+    )
+
+
+def _looks_like_not_found_page(page: ScrapedPage) -> bool:
+    title = (page.title or "").lower()
+    if any(
+        phrase in title
+        for phrase in (
+            "404",
+            "page not found",
+            "not found",
+            "page non trouvée",
+            "seite nicht gefunden",
+            "side ikke fundet",
+            "stránka nenalezena",
+            "страница не найдена",
+        )
+    ):
+        return True
+    return "404" in page.final_url.lower()
 
 
 def prioritize_links(source_url: str, links: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -320,22 +444,196 @@ def fallback_links(source_url: str, links: list[dict[str, str]]) -> list[dict[st
     return candidates
 
 
-def should_stop_after_page(page: ScrapedPage, settings: CrawlSettings) -> bool:
+def should_stop_after_page(
+    page: ScrapedPage,
+    settings: CrawlSettings,
+    *,
+    prioritized_links: list[dict[str, str]] | None = None,
+    pending_queue: deque[tuple[str, int]] | None = None,
+) -> bool:
     if not settings.stop_after_successful_meeting_page:
+        return False
+    if page.extracted_count > 0 and _is_landing_page_url(page.final_url):
+        return not _has_deeper_meeting_directory_link(
+            page.final_url,
+            prioritized_links or [],
+        )
+    if page.extracted_count > 0 and _has_pending_meeting_branch(page.final_url, pending_queue):
         return False
     return (
         page.extracted_count >= settings.successful_meeting_page_min_records
-        and page.page_score >= settings.successful_meeting_page_min_score
+        and (
+            page.page_score >= settings.successful_meeting_page_min_score
+            or page.page_score >= 0.5
+        )
     )
+
+
+def _is_landing_page_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (parsed.path or "/").rstrip("/") in {"", "/"}
+
+
+def _has_deeper_meeting_directory_link(
+    page_url: str,
+    prioritized_links: list[dict[str, str]],
+) -> bool:
+    current = normalize_crawl_url(page_url)
+    for link in prioritized_links:
+        link_url = normalize_crawl_url(link["url"])
+        if normalize_crawl_url(link_url) == current:
+            continue
+        if _looks_like_deeper_meeting_directory_link(link_url, link.get("text", "")):
+            return True
+    return False
+
+
+def _has_pending_meeting_branch(
+    page_url: str,
+    pending_queue: deque[tuple[str, int]] | None,
+) -> bool:
+    if pending_queue is None:
+        return False
+    current = normalize_crawl_url(page_url)
+    for queued_url, _depth in pending_queue:
+        candidate = normalize_crawl_url(queued_url)
+        if candidate == current:
+            continue
+        if _looks_like_pending_meeting_branch(candidate):
+            return True
+    return False
+
+
+def _looks_like_pending_meeting_branch(url: str) -> bool:
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/").lower()
+    if not path:
+        return False
+    if _looks_like_deeper_meeting_directory_link(url, ""):
+        return True
+    path_parts = [part for part in path.split("/") if part]
+    return bool(path_parts and path_parts[0] in {"meeting", "meetings", "meeting-schedule"})
+
+
+def _looks_like_deeper_meeting_directory_link(url: str, text: str) -> bool:
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/").lower()
+    if not path:
+        return False
+    score = score_link(url, text)
+    if "strong_public_meeting_directory" in score.signals:
+        return True
+    last_segment = path.rsplit("/", 1)[-1]
+    directory_terms = ("meeting", "meetings", "schedule", "møteliste", "moteliste")
+    return score.score >= 0.5 and any(term in last_segment for term in directory_terms)
+
+
+def _tsml_json_feed_url_from_html(html: str, base_url: str) -> str | None:
+    soup = BeautifulSoup(html, "html.parser")
+    for link in soup.select("link[rel~='alternate'][type='application/json'][href]"):
+        href = str(link.get("href") or "")
+        title = str(link.get("title") or "").lower()
+        if not href:
+            continue
+        if "action=meetings" in href.lower() or "meetings feed" in title:
+            feed_url = normalize_crawl_url(urljoin(base_url, href))
+            return _tsml_feed_url_with_page_filters(feed_url, base_url)
+    for element in soup.select("[data-src]"):
+        data_src = str(element.get("data-src") or "")
+        if data_src and _looks_like_tsml_json_feed_url(data_src):
+            return normalize_crawl_url(urljoin(base_url, data_src))
+    return None
+
+
+def _tsml_feed_url_with_page_filters(feed_url: str, page_url: str) -> str:
+    page_query = parse_qsl(urlparse(page_url).query, keep_blank_values=False)
+    feed_query = parse_qsl(urlparse(feed_url).query, keep_blank_values=True)
+    existing_keys = {key.lower() for key, _value in feed_query}
+    for key, value in page_query:
+        filter_key = key.lower().removeprefix("tsml-")
+        if filter_key == key.lower() or filter_key not in {
+            "attendance_option",
+            "district",
+            "region",
+        }:
+            continue
+        if value.strip().lower() in {"", "all", "any"} or filter_key in existing_keys:
+            continue
+        feed_query.append((filter_key, value))
+        existing_keys.add(filter_key)
+    if not feed_query:
+        return feed_url
+    parsed_feed = urlparse(feed_url)
+    return urlunparse(parsed_feed._replace(query=urlencode(feed_query)))
+
+
+def _tsml_json_feed_url_from_page_url(page_url: str) -> str | None:
+    parsed = urlparse(page_url)
+    if "tsml-" not in parsed.query.lower():
+        return None
+    feed_url = urlunparse(
+        parsed._replace(
+            path="/wp-admin/admin-ajax.php",
+            params="",
+            query="action=meetings",
+            fragment="",
+        )
+    )
+    return normalize_crawl_url(_tsml_feed_url_with_page_filters(feed_url, page_url))
+
+
+def _looks_like_tsml_json_feed_url(url: str) -> bool:
+    lowered = url.lower()
+    return "action=meetings" in lowered or "meetings-tsml" in lowered
+
+
+async def _fetch_json_feed_text(page: Any, url: str) -> str:
+    try:
+        response = await page.evaluate(
+            """
+            async url => {
+              const response = await fetch(url, {
+                credentials: 'same-origin',
+                headers: { Accept: 'application/json' }
+              });
+              return {
+                status: response.status,
+                contentType: response.headers.get('content-type') || '',
+                text: await response.text()
+              };
+            }
+            """,
+            url,
+        )
+    except Exception:
+        response = None
+    if isinstance(response, dict) and response.get("status") == 200:
+        text = response.get("text")
+        return text if isinstance(text, str) else ""
+    request = getattr(getattr(page, "context", None), "request", None)
+    if request is None:
+        return ""
+    try:
+        api_response = await request.get(
+            url,
+            headers={"Accept": "application/json"},
+            timeout=15_000,
+        )
+        if getattr(api_response, "status", None) != 200:
+            return ""
+        text = await api_response.text()
+    except Exception:
+        return ""
+    return text if isinstance(text, str) else ""
 
 
 async def _page_links(page: Any, base_url: str) -> list[dict[str, str]]:
     raw_links = await page.eval_on_selector_all(
-        "a[href]",
+        "a[href], link[rel~='alternate'][type='application/json'][href]",
         """
         links => links.map(link => ({
           url: link.getAttribute('href'),
-          text: link.textContent || ''
+          text: link.textContent || link.getAttribute('title') || link.getAttribute('type') || ''
         }))
         """,
     )
@@ -348,13 +646,26 @@ async def _page_links(page: Any, base_url: str) -> list[dict[str, str]]:
         href = raw_link.get("url")
         if not href:
             continue
+        normalized_url = normalize_crawl_url(urljoin(base_url, str(href)))
+        normalized_url = _tsml_json_feed_url_from_page_url(normalized_url) or normalized_url
         links.append(
             {
-                "url": normalize_crawl_url(urljoin(base_url, str(href))),
+                "url": normalized_url,
                 "text": str(raw_link.get("text") or ""),
             }
         )
     return links
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
 
 
 async def _safe_page_content(page: Any) -> str:

@@ -1,8 +1,18 @@
+from collections import deque
+
 from app.scraping.browser_crawler import (
+    _fetch_json_feed_text,
+    _has_deeper_meeting_directory_link,
+    _has_pending_meeting_branch,
+    _looks_like_not_found_page,
+    _page_links,
+    _tsml_json_feed_url_from_html,
+    _without_common_meeting_path_links,
     _wix_data_items_to_text,
     common_meeting_path_links,
     initial_crawl_queue,
     is_allowed_url,
+    is_common_meeting_path,
     prioritize_links,
     should_stop_after_page,
 )
@@ -160,6 +170,89 @@ def test_extract_meetings_from_rendered_bmlt_table() -> None:
     assert meetings[0].payload["address_line1"] == "10 Prospect St., Auburn, NY, 13021"
 
 
+def test_extract_meetings_from_tsml_json_feed() -> None:
+    html = """
+    [
+      {
+        "id": 439,
+        "name": "Keep it Real Mondays",
+        "day": 1,
+        "time": "10:30",
+        "time_formatted": "10:30 am",
+        "types": ["BE", "O"],
+        "location": "21D Grant Street",
+        "formatted_address": "21D Grant St, Inverness IV3 8BN, UK",
+        "timezone": "Europe/London",
+        "attendance_option": "in_person"
+      }
+    ]
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://cascotland.org.uk/wp-admin/admin-ajax.php?action=meetings",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].method == "tsml_json_feed"
+    assert meetings[0].payload["source_record_id"] == "439"
+    assert meetings[0].payload["day"] == "Monday"
+    assert meetings[0].payload["time"] == "10:30 am"
+    assert meetings[0].payload["venue_name"] == "21D Grant Street"
+    assert meetings[0].payload["address_line1"] == "21D Grant St, Inverness IV3 8BN, UK"
+    assert meetings[0].payload["timezone"] == "Europe/London"
+
+
+def test_extract_meetings_from_rendered_tsml_table() -> None:
+    html = """
+    <div id="tsml">
+      <table class="table table-striped">
+        <thead>
+          <tr>
+            <th class="time">Time</th>
+            <th class="name">Meeting</th>
+            <th class="location_group">Location / Group</th>
+            <th class="address">Address</th>
+            <th class="region">Region</th>
+            <th class="types">Types</th>
+          </tr>
+        </thead>
+        <tbody id="meetings_tbody">
+          <tr class="type-o attendance-in_person">
+            <td class="time" data-sort="4-12:30-clydebank-methodist-church">
+              <span>12:30 pm</span>
+            </td>
+            <td class="name">
+              <a href="https://cascotland.org.uk/meetings/womens-c-a-meeting/">
+                Women's C.A. Meeting
+              </a>
+            </td>
+            <td class="location">
+              <div class="location-name notranslate">Clydebank Methodist Church</div>
+            </td>
+            <td class="address notranslate">10 Main Street</td>
+            <td class="region notranslate">Clydebank</td>
+            <td class="types">Open</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://cascotland.org.uk/meetings/",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].method == "tsml_rendered_table_row"
+    assert meetings[0].payload["source_record_id"] == "womens-c-a-meeting"
+    assert meetings[0].payload["day"] == "Thursday"
+    assert meetings[0].payload["time"] == "12:30 pm"
+    assert meetings[0].payload["venue_name"] == "Clydebank Methodist Church"
+    assert meetings[0].payload["address_line1"] == "10 Main Street"
+
+
 def test_extract_meetings_from_wordpress_day_sections() -> None:
     html = """
     <article>
@@ -187,6 +280,35 @@ def test_extract_meetings_from_wordpress_day_sections() -> None:
     assert meetings[0].payload["day"] == "Monday"
     assert meetings[0].payload["address_line1"] == "4415 S. Rural Rd., Tempe, AZ 85282"
     assert meetings[1].payload["phone_join_info"] == "ONLINE Zoom Meeting Meeting ID: 852 9758 1348"
+
+
+def test_extract_meetings_from_accordion_day_panels() -> None:
+    html = """
+    <div class="panel">
+      <div class="panel-title"><a class="wb-accordion-title"><div>Monday</div></a></div>
+      <div class="panel-body">
+        <p><strong>6:00pm - 7:00pm</strong></p>
+        <p><strong>Going Forward - Kelowna</strong></p>
+        <p>Location: 1169 Sutherland Avenue, Kelowna BC</p>
+        <p>&nbsp;</p>
+        <p><strong>7:00pm - 8:30pm</strong></p>
+        <p><strong>Light Side - Chilliwack</strong></p>
+        <p>Location: Community Hall</p>
+      </div>
+    </div>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/meetings",
+    )
+
+    assert len(meetings) == 2
+    assert meetings[0].payload["day"] == "Monday"
+    assert meetings[0].payload["time"] == "6:00pm"
+    assert meetings[0].payload["name"] == "Going Forward - Kelowna"
+    assert meetings[0].payload["address_line1"] == "1169 Sutherland Avenue, Kelowna BC"
+    assert meetings[1].payload["address_line1"] == "Community Hall"
 
 
 def test_extract_meetings_from_polish_day_sections() -> None:
@@ -389,6 +511,146 @@ def test_extract_meetings_from_site_builder_content_blocks() -> None:
     assert meetings[0].payload["address_line1"] == "431 North 16th St Oxford, MS 38655"
 
 
+def test_extract_meetings_from_rendered_landing_page_sequence_text() -> None:
+    html = """
+    <div data-rendered-text-fallback="true"><pre>
+    MEETINGS
+
+    More Info
+
+    Address:
+
+    1161 Sherburne Ave
+
+    Saint Paul, MN 55104
+
+    NEW MEETING
+
+    Sufficient Substitute
+
+    Tuesdays at 7:30 pm
+
+    (in person)
+
+    Begins August 19, 2025
+
+    Upfront Alano Clubhouse
+
+    302 4th Ave N.E.
+
+    Brainard, MN 56401
+
+    612-889-6916
+
+    More Info
+
+    "My Pen is Not A Pusher"
+
+    Friday 7:00 P.M
+
+    St Paul
+
+    "Recovery is Not and Chore"
+
+    Wednesday 7:15 PM
+
+    St Paul
+    </pre></div>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://www.caminnesota.org/",
+    )
+
+    assert [meeting.method for meeting in meetings] == [
+        "heuristic_sequence_text",
+        "heuristic_sequence_text",
+        "heuristic_sequence_text",
+    ]
+    assert meetings[0].payload["name"] == "Sufficient Substitute"
+    assert meetings[0].payload["day"] == "Tuesday"
+    assert meetings[0].payload["time"] == "7:30 pm"
+    assert meetings[0].payload["venue_name"] == "Upfront Alano Clubhouse"
+    assert meetings[0].payload["address_line1"] == "302 4th Ave N.E."
+    assert meetings[0].payload["city"] == "Brainard, MN 56401"
+    assert meetings[0].payload["phone_join_info"] == "612-889-6916"
+    assert meetings[1].payload["name"] == "My Pen is Not A Pusher"
+    assert meetings[1].payload["day"] == "Friday"
+    assert meetings[1].payload["city"] == "St Paul"
+    assert meetings[2].payload["name"] == "Recovery is Not and Chore"
+
+
+def test_extract_meetings_normalizes_homepage_dot_and_compact_times() -> None:
+    html = """
+    <main>
+      <p><strong>Chiang Mai Group</strong><br>
+      Saturday 4.30pm<br>
+      Oyes smoothie<br>
+      No. 27, 1 Hussadhisawee Road, Chiang Mai 50300</p>
+
+      <p><strong>Friday morning</strong><br>
+      Time: 9.30am -10.30am - Speaker topic meeting<br>
+      SEASHELL restaurant&amp;bar<br>
+      58/3 Moo 8 Koh Phangan</p>
+
+      <p><strong>Bangkok Group</strong><br>
+      Every Sunday at 930am<br>
+      Bangkok Recovery Club<br>
+      13 Soi Preeda Bangkok</p>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://cathailand.org/",
+    )
+
+    assert [meeting.payload["time"] for meeting in meetings] == ["4:30pm", "9:30am", "9:30am"]
+    assert meetings[0].payload["day"] == "Saturday"
+    assert meetings[1].payload["day"] == "Friday"
+    assert meetings[2].payload["day"] == "Sunday"
+
+
+def test_extract_meetings_from_inline_landing_page_schedule() -> None:
+    html = """
+    <main>
+      <h3>CA OSLO - KRYPTEN mandag kl. 20-21 (åpner kl. 19)
+      fredag kl. 20-21 (åpner kl. 19) Holtegata 15, 0259 Oslo</h3>
+      <h3>DO OR DIE - MAJORSTUEN tirsdag 18:00-19:00 Rosenborggata 3, 0356 Oslo</h3>
+      <h3>CA ONLINE - GI DET VIDERE onsdag kl. 19-20
+      Zoom møte-ID: 85603686376 https://us06web.zoom.us/j/85603686376#success</h3>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://www.ca-norge.no/",
+    )
+
+    assert [meeting.payload["name"] for meeting in meetings] == [
+        "CA OSLO - KRYPTEN",
+        "CA OSLO - KRYPTEN",
+        "DO OR DIE - MAJORSTUEN",
+        "CA ONLINE - GI DET VIDERE",
+    ]
+    assert [meeting.payload["day"] for meeting in meetings] == [
+        "Mandag",
+        "Fredag",
+        "Tirsdag",
+        "Onsdag",
+    ]
+    assert [meeting.payload["time"] for meeting in meetings] == [
+        "20:00",
+        "20:00",
+        "18:00",
+        "19:00",
+    ]
+    assert meetings[0].payload["address_line1"] == "Holtegata 15, 0259 Oslo"
+    assert meetings[2].payload["address_line1"] == "Rosenborggata 3, 0356 Oslo"
+    assert meetings[3].payload["online_url"] == "https://us06web.zoom.us/j/85603686376#success"
+
+
 def test_text_fallback_rejects_generic_app_store_page_text() -> None:
     html = """
     <title>Meetings - Fellowship</title>
@@ -469,6 +731,122 @@ def test_crawler_prioritizes_meeting_links_and_stays_on_site() -> None:
     assert not is_allowed_url("https://example.org/", "https://external.test/meetings")
 
 
+async def test_crawler_collects_alternate_json_meeting_feed() -> None:
+    class FakePage:
+        async def eval_on_selector_all(self, selector: str, script: str) -> list[dict[str, str]]:
+            assert "link[rel~='alternate'][type='application/json'][href]" in selector
+            assert "links.map" in script
+            return [
+                {
+                    "url": "/wp-admin/admin-ajax.php?action=meetings",
+                    "text": "Meetings Feed",
+                }
+            ]
+
+    links = await _page_links(FakePage(), "https://example.org/meetings/")
+    prioritized = prioritize_links("https://example.org/", links)
+
+    assert links == [
+        {
+            "url": "https://example.org/wp-admin/admin-ajax.php?action=meetings",
+            "text": "Meetings Feed",
+        }
+    ]
+    assert prioritized == links
+
+
+async def test_crawler_converts_tsml_filter_links_to_json_feed() -> None:
+    class FakePage:
+        async def eval_on_selector_all(self, selector: str, script: str) -> list[dict[str, str]]:
+            assert "link[rel~='alternate'][type='application/json'][href]" in selector
+            assert "links.map" in script
+            return [
+                {
+                    "url": "/meetings/?tsml-day=any&tsml-district=kent",
+                    "text": "Meetings",
+                }
+            ]
+
+    links = await _page_links(FakePage(), "https://meetings.cakent.org/")
+
+    assert links == [
+        {
+            "url": (
+                "https://meetings.cakent.org/wp-admin/admin-ajax.php?"
+                "action=meetings&district=kent"
+            ),
+            "text": "Meetings",
+        }
+    ]
+
+
+def test_crawler_detects_tsml_json_feed_url() -> None:
+    html = """
+    <html>
+      <head>
+        <link rel="alternate" type="application/json" title="Meetings Feed"
+          href="/wp-admin/admin-ajax.php?action=meetings">
+      </head>
+    </html>
+    """
+
+    feed_url = _tsml_json_feed_url_from_html(html, "https://example.org/meetings/")
+
+    assert feed_url == "https://example.org/wp-admin/admin-ajax.php?action=meetings"
+
+
+def test_crawler_detects_tsml_data_src_feed_url() -> None:
+    html = """
+    <html>
+      <body>
+        <div id="tsml-ui"
+          data-src="https://caws-api.azurewebsites.net/api/v1/meetings-tsml?area=Ohio">
+        </div>
+      </body>
+    </html>
+    """
+
+    feed_url = _tsml_json_feed_url_from_html(html, "https://caohioarea.org/")
+
+    assert feed_url == "https://caws-api.azurewebsites.net/api/v1/meetings-tsml?area=Ohio"
+
+
+def test_crawler_carries_tsml_page_filters_to_json_feed_url() -> None:
+    html = """
+    <html>
+      <head>
+        <link rel="alternate" type="application/json" title="Meetings Feed"
+          href="/wp-admin/admin-ajax.php?action=meetings">
+      </head>
+    </html>
+    """
+
+    feed_url = _tsml_json_feed_url_from_html(
+        html,
+        "https://meetings.cakent.org/meetings/?tsml-day=any&tsml-district=kent",
+    )
+
+    assert (
+        feed_url
+        == "https://meetings.cakent.org/wp-admin/admin-ajax.php?action=meetings&district=kent"
+    )
+
+
+async def test_crawler_fetches_json_feed_text() -> None:
+    class FakePage:
+        async def evaluate(self, script: str, url: str) -> dict[str, object]:
+            assert "fetch(url" in script
+            assert url == "https://example.org/wp-admin/admin-ajax.php?action=meetings"
+            return {"status": 200, "contentType": "application/json", "text": '[{"id": 1}]'}
+
+    text = await _fetch_json_feed_text(
+        FakePage(),
+        "https://example.org/wp-admin/admin-ajax.php?action=meetings",
+    )
+
+    assert text == '[{"id": 1}]'
+
+
 def test_crawler_prioritizes_public_meeting_tabs_over_service_pages() -> None:
     links = [
         {
@@ -522,6 +900,7 @@ def test_crawler_can_fallback_to_common_meeting_paths() -> None:
 
     assert "https://www.caireland.live/meeting-schedule" in urls
     assert "https://www.caireland.live/meetings/" in urls
+    assert "https://www.caireland.live/meetings" not in urls
 
 
 def test_crawler_stops_after_successful_meeting_directory() -> None:
@@ -543,3 +922,141 @@ def test_crawler_stops_after_successful_meeting_directory() -> None:
     )
 
     assert should_stop_after_page(page, CrawlSettings())
+
+
+def test_crawler_stops_after_record_rich_homepage() -> None:
+    page = ScrapedPage(
+        url="https://example.org/",
+        final_url="https://example.org/",
+        title="Homepage",
+        html="",
+        page_score=0.56,
+        extracted=[
+            ExtractedMeeting(
+                payload={"name": "Homepage Meeting"},
+                method="test",
+                confidence=0.9,
+                source_page_url="https://example.org/",
+            )
+            for _ in range(4)
+        ],
+    )
+
+    assert should_stop_after_page(page, CrawlSettings())
+
+
+def test_crawler_stops_after_any_landing_page_meeting() -> None:
+    page = ScrapedPage(
+        url="https://example.org/",
+        final_url="https://example.org/",
+        title="Homepage",
+        html="",
+        page_score=0.22,
+        extracted=[
+            ExtractedMeeting(
+                payload={"name": "Only Homepage Meeting"},
+                method="test",
+                confidence=0.9,
+                source_page_url="https://example.org/",
+            )
+        ],
+    )
+
+    assert should_stop_after_page(page, CrawlSettings())
+
+
+def test_crawler_continues_after_landing_page_preview_with_directory_link() -> None:
+    page = ScrapedPage(
+        url="https://example.org/",
+        final_url="https://example.org/",
+        title="Homepage",
+        html="",
+        page_score=0.58,
+        extracted=[
+            ExtractedMeeting(
+                payload={"name": "Homepage Preview"},
+                method="test",
+                confidence=0.9,
+                source_page_url="https://example.org/",
+            )
+        ],
+    )
+    links = [
+        {"url": "https://example.org/full-meetings/", "text": "Meetings"},
+    ]
+
+    assert not should_stop_after_page(page, CrawlSettings(), prioritized_links=links)
+    assert _has_deeper_meeting_directory_link(page.final_url, links)
+
+
+def test_crawler_ignores_landing_page_self_link_when_stopping() -> None:
+    page = ScrapedPage(
+        url="https://example.org/",
+        final_url="https://example.org/",
+        title="Homepage",
+        html="",
+        page_score=0.58,
+        extracted=[
+            ExtractedMeeting(
+                payload={"name": "Homepage Schedule"},
+                method="test",
+                confidence=0.9,
+                source_page_url="https://example.org/",
+            )
+        ],
+    )
+    links = [
+        {"url": "https://example.org/", "text": "Meetings"},
+    ]
+
+    assert should_stop_after_page(page, CrawlSettings(), prioritized_links=links)
+
+
+def test_crawler_continues_when_meeting_branch_siblings_are_pending() -> None:
+    page = ScrapedPage(
+        url="https://example.org/meetings/region-a/",
+        final_url="https://example.org/meetings/region-a/",
+        title="Region A Meetings",
+        html="",
+        page_score=0.6,
+        extracted=[
+            ExtractedMeeting(
+                payload={"name": "Region A"},
+                method="test",
+                confidence=0.9,
+                source_page_url="https://example.org/meetings/region-a/",
+            )
+            for _ in range(3)
+        ],
+    )
+    pending = deque(
+        [
+            ("https://example.org/meetings/region-b/", 2),
+            ("https://example.org/contact/", 1),
+        ]
+    )
+
+    assert _has_pending_meeting_branch(page.final_url, pending)
+    assert not should_stop_after_page(page, CrawlSettings(), pending_queue=pending)
+
+
+def test_crawler_prunes_guessed_common_paths_after_not_found_pages() -> None:
+    queue = deque(
+        [
+            ("https://example.org/meeting-schedule", 1),
+            ("https://example.org/find-a-meeting", 1),
+            ("https://example.org/contact", 1),
+        ]
+    )
+    page = ScrapedPage(
+        url="https://example.org/meetings/",
+        final_url="https://example.org/meetings",
+        title="404 Error: Page Not Found",
+        html="",
+    )
+
+    pruned = _without_common_meeting_path_links(queue, "https://example.org/")
+
+    assert _looks_like_not_found_page(page)
+    assert is_common_meeting_path("https://example.org/", "https://example.org/meetings")
+    assert list(pruned) == [("https://example.org/contact", 1)]

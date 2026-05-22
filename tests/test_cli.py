@@ -2,7 +2,8 @@ import json
 
 from typer.testing import CliRunner
 
-from app.cli import app
+from app.cli import _ca_world_listings_shadowed_by_local_sources, app
+from app.sources.registry import Source, SourceType
 
 from .conftest import FIXTURES
 
@@ -102,6 +103,28 @@ def test_scrape_source_dry_run_uses_html_fixture(tmp_path) -> None:
     assert "records_extracted: 1" in result.output
     assert "candidates_normalized: 1" in result.output
     assert "artifact_dir:" in result.output
+
+
+def test_ca_world_listing_is_shadowed_when_local_source_exists() -> None:
+    sources = [
+        Source(
+            id="ca-world-thailand",
+            fellowship="ca",
+            name="Thailand",
+            url="https://ca.org/meetings/thailand/",
+            source_type=SourceType.WORLD_SERVICE_LISTING,
+        ),
+        Source(
+            id="ca-thailand",
+            fellowship="ca",
+            name="Thailand Area",
+            url="https://cathailand.org",
+            source_type=SourceType.LOCAL_SERVICE_BODY,
+            config={"metadata": {"world_source": "https://ca.org/meetings/thailand/"}},
+        ),
+    ]
+
+    assert _ca_world_listings_shadowed_by_local_sources(sources) == {"ca-world-thailand"}
 
 
 def test_import_artifacts_dry_run_uses_summary_payload(tmp_path) -> None:

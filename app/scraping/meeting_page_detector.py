@@ -35,7 +35,16 @@ NEGATIVE_TERMS = {
     "start-a-meeting",
     "update-register",
 }
-TIME_RE = re.compile(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)\b", re.IGNORECASE)
+TIME_RE = re.compile(
+    r"\b(?:(?:\d{1,2}(?::|\.|;)?\d{2}|\d{1,2})\s*(?:am|pm|a\.m\.|p\.m\.)|"
+    r"kl\.?\s*(?:[01]?\d|2[0-3])(?:(?::|\.)[0-5]\d)?"
+    r"(?:\s*(?:to|-|–|—)\s*(?:[01]?\d|2[0-3])(?:(?::|\.)[0-5]\d)?)?|"
+    r"(?:[01]?\d|2[0-3]):[0-5]\d"
+    r"(?:\s*(?:to|-|–|—)\s*(?:[01]?\d|2[0-3]):[0-5]\d)?|"
+    r"12\s*noon|midnight)"
+    r"(?=\W|$)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
