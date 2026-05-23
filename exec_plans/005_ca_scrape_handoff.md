@@ -378,3 +378,31 @@ Nebraska/Utah scope note:
 
 - Nebraska `ca-a27a5c3933d7` is now `15` records / `1` page from `meetings-tsml?area=Nebraska`; prior `40`-record runs included `ca-online.org`.
 - Utah `ca-6e8cc57bd9cf` is now `18` records / `1` page from `meetings-tsml?area=Utah`; the older `44`-record selective run included a broader external online listing, while the earlier fast run had `19` records on the Utah source itself.
+
+## 2026-05-23 Import
+
+The final dry-run artifact set `scrape_artifacts/ca-wide-dry-run-20260522-final-fast` was imported into the local development database `recovery_meeting_ingestion_dev`.
+
+Dry-run gate:
+
+- Command: `.venv/bin/python -m app.cli import-artifacts scrape_artifacts/ca-wide-dry-run-20260522-final-fast --dry-run`
+- Summaries imported by default: `97` successful source summaries. The `3` failed source summaries were excluded.
+- Records extracted: `2,356`.
+- Records fetched: `2,341`.
+- Candidates normalized: `2,340`.
+- Review flags: `2,042`.
+
+Real import:
+
+- Command: `.venv/bin/python -m app.cli import-artifacts scrape_artifacts/ca-wide-dry-run-20260522-final-fast --no-dry-run`
+- Raw records stored: `2,324`.
+- Canonical meetings upserted: `2,340`.
+- Post-import database counts: `2,159` sources, `5,939` raw meetings, `5,938` canonical meetings, `2,448` review flags, `255` import runs.
+- `python -m app.cli report` returned `5,938` active meetings and `2,074` review flags.
+
+Snapshot export:
+
+- Dry run returned `5,135` snapshot meetings and `6` blocked-by-review records.
+- Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
+- Output: `snapshots/meetings-2026-05-23T214837Z.json` and `snapshots/latest.json`.
+- Snapshot DB row: `320bfded-333e-43da-b0f9-a377dfb61aa2`, `5,135` meetings, `6` blocked by review.
