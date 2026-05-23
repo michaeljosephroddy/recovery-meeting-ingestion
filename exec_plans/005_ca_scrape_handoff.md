@@ -406,3 +406,36 @@ Snapshot export:
 - Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
 - Output: `snapshots/meetings-2026-05-23T214837Z.json` and `snapshots/latest.json`.
 - Snapshot DB row: `320bfded-333e-43da-b0f9-a377dfb61aa2`, `5,135` meetings, `6` blocked by review.
+
+## 2026-05-23 Timezone Replay
+
+The first artifact import left `1,134` open `missing_timezone` warnings because artifact replay normalized records before it had access to persisted source timezone metadata. Artifact replay now merges read-only source metadata from the local repository before normalization and uses the shared source timezone inference helper for single-timezone countries such as Ireland and the United Kingdom.
+
+Validation:
+
+- `.venv/bin/ruff check app tests`: passed.
+- `.venv/bin/mypy app`: passed.
+- `.venv/bin/pytest -q`: `101 passed, 10 skipped`.
+
+Dry-run replay:
+
+- Command: `.venv/bin/python -m app.cli import-artifacts scrape_artifacts/ca-wide-dry-run-20260522-final-fast --dry-run`
+- Records extracted: `2,356`.
+- Records fetched: `2,341`.
+- Candidates normalized: `2,340`.
+- Review flags: `1,106`, down from `2,042` on the first dry-run import gate.
+
+Real replay:
+
+- Command: `.venv/bin/python -m app.cli import-artifacts scrape_artifacts/ca-wide-dry-run-20260522-final-fast --no-dry-run`
+- Raw records stored: `0`, because the same raw record hashes had already been imported.
+- Canonical meetings upserted: `2,340`.
+- Open review flags after replay: `1,133`, down from `2,074`.
+- Open `missing_timezone` warnings after replay: `198` across `23` sources, down from `1,134` across `53` sources.
+- Remaining open error flags: `1`, the Poland normalization failure `ca-18329a6abe7c` / `8de0df45026737b9`.
+
+Replacement snapshot:
+
+- Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
+- Output: `snapshots/meetings-2026-05-23T215857Z.json` and `snapshots/latest.json`.
+- Snapshot DB row: `49923b3e-4607-440f-bd4c-b00dde39baef`, `5,135` meetings, `1` blocked by review.

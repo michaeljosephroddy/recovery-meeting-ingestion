@@ -55,3 +55,16 @@ def test_source_from_candidate_infers_region_and_timezone_from_label() -> None:
 
     assert source.region == "California"
     assert source.config["timezone"] == "America/Los_Angeles"
+
+
+def test_source_from_candidate_infers_single_timezone_country() -> None:
+    source = source_from_candidate(
+        SourceCandidate(
+            fellowship="ca",
+            label="Ireland",
+            url="https://caireland.example/",
+            country="Ireland",
+        )
+    )
+
+    assert source.config["timezone"] == "Europe/Dublin"

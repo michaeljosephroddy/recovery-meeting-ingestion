@@ -97,6 +97,24 @@ CANADA_REGION_TIMEZONES = {
     "Saskatchewan": "America/Regina",
 }
 
+COUNTRY_TIMEZONES = {
+    "denmark": "Europe/Copenhagen",
+    "france": "Europe/Paris",
+    "germany": "Europe/Berlin",
+    "greece": "Europe/Athens",
+    "hong kong": "Asia/Hong_Kong",
+    "ie": "Europe/Dublin",
+    "ireland": "Europe/Dublin",
+    "netherlands": "Europe/Amsterdam",
+    "norway": "Europe/Oslo",
+    "poland": "Europe/Warsaw",
+    "portugal": "Europe/Lisbon",
+    "sweden": "Europe/Stockholm",
+    "thailand": "Asia/Bangkok",
+    "uk": "Europe/London",
+    "united kingdom": "Europe/London",
+}
+
 
 class Source(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -202,6 +220,8 @@ def timezone_for_candidate(
         return US_REGION_TIMEZONES.get(region)
     if country == "canada" and region:
         return CANADA_REGION_TIMEZONES.get(region)
+    if timezone := COUNTRY_TIMEZONES.get(country):
+        return timezone
     return None
 
 

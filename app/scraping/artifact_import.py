@@ -7,7 +7,13 @@ from typing import Any, cast
 from app.adapters.base import RawMeeting
 from app.config import Settings
 from app.ingest import IngestResult, ingest_raw_records
-from app.sources.registry import AdapterType, Source, SourceType
+from app.sources.registry import (
+    AdapterType,
+    Source,
+    SourceCandidate,
+    SourceType,
+    timezone_for_candidate,
+)
 
 
 @dataclass(frozen=True)
@@ -142,8 +148,29 @@ def _source_from_summary(
     source_id = _required_string(summary.get("source_id"), "source_id")
     source_url = _required_string(summary.get("source_url"), "source_url")
     fellowship = _optional_string((metadata or {}).get("fellowship")) or source_id.split("-", 1)[0]
+    country = _optional_string((metadata or {}).get("country"))
+    region = _optional_string((metadata or {}).get("region"))
     config: dict[str, Any] = {"scrape": {"artifact_import": True}}
+    source_config = (metadata or {}).get("config")
+    if isinstance(source_config, dict):
+        config.update(source_config)
+        scrape_value = config.get("scrape")
+        scrape_config = dict(scrape_value) if isinstance(scrape_value, dict) else {}
+        scrape_config["artifact_import"] = True
+        config["scrape"] = scrape_config
     timezone = _optional_string((metadata or {}).get("timezone"))
+    if timezone is None and source_config:
+        timezone = _optional_string(config.get("timezone"))
+    if timezone is None:
+        timezone = timezone_for_candidate(
+            SourceCandidate(
+                fellowship=cast(Any, fellowship),
+                label=_optional_string((metadata or {}).get("name")) or source_id,
+                url=source_url,
+                country=country,
+                region=region,
+            )
+        )
     if timezone:
         config["timezone"] = timezone
     return Source(
@@ -151,8 +178,8 @@ def _source_from_summary(
         fellowship=cast(Any, fellowship),
         name=_optional_string((metadata or {}).get("name")) or source_id,
         url=source_url,
-        country=_optional_string((metadata or {}).get("country")),
-        region=_optional_string((metadata or {}).get("region")),
+        country=country,
+        region=region,
         source_type=SourceType.LOCAL_SERVICE_BODY,
         adapter_type=AdapterType.PLAYWRIGHT_BROWSER,
         requires_browser=True,

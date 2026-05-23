@@ -475,7 +475,10 @@ def import_artifacts(
         source_id=source_id,
         include_failed=include_failed,
     )
-    metadata = source_metadata_by_id(artifact_dir if artifact_dir.is_dir() else artifact_dir.parent)
+    metadata = _artifact_source_metadata_by_id(
+        settings,
+        artifact_dir if artifact_dir.is_dir() else artifact_dir.parent,
+    )
     console.print(f"Import artifacts dry_run={dry_run}")
     console.print(f"artifact_dir: {artifact_dir}")
     console.print(f"summaries: {len(summaries)}")
@@ -622,6 +625,51 @@ def export_snapshot(dry_run: bool = True) -> None:
         snapshot_id = "not recorded"
     console.print(f"output: {path}")
     console.print(f"snapshot_id: {snapshot_id}")
+
+
+def _artifact_source_metadata_by_id(
+    settings: Settings,
+    artifact_dir: Path,
+) -> dict[str, dict[str, Any]]:
+    stored = _stored_source_metadata_by_id(settings)
+    artifact = source_metadata_by_id(artifact_dir)
+    merged = dict(stored)
+    for source_id, metadata in artifact.items():
+        base = dict(merged.get(source_id, {}))
+        base_config = base.get("config")
+        metadata_config = metadata.get("config")
+        merged_config = None
+        if isinstance(base_config, dict) or isinstance(metadata_config, dict):
+            merged_config = {
+                **(base_config if isinstance(base_config, dict) else {}),
+                **(metadata_config if isinstance(metadata_config, dict) else {}),
+            }
+        base.update(metadata)
+        if merged_config is not None:
+            base["config"] = merged_config
+        merged[source_id] = base
+    return merged
+
+
+def _stored_source_metadata_by_id(settings: Settings) -> dict[str, dict[str, Any]]:
+    try:
+        with connect(settings) as connection:
+            sources = SourceRepository(connection).list_sources()
+    except Exception:
+        return {}
+    return {
+        source.id: {
+            "source_id": source.id,
+            "fellowship": source.fellowship,
+            "name": source.name,
+            "url": source.url,
+            "country": source.country,
+            "region": source.region,
+            "timezone": source.config.get("timezone"),
+            "config": source.config,
+        }
+        for source in sources
+    }
 
 
 @app.command("report")
