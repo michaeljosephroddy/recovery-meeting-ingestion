@@ -122,6 +122,12 @@ DAY_NAMES = {
     "เสาร์": 6,
 }
 
+DAILY_NAMES = {
+    "codziennie",
+    "daily",
+    "every day",
+}
+
 
 def parse_time(value: str | None) -> time | None:
     if value is None:
@@ -145,15 +151,22 @@ def parse_time(value: str | None) -> time | None:
 
 
 def normalize_day(value: int | str | None) -> int | None:
+    days = normalize_days(value)
+    return days[0] if days else None
+
+
+def normalize_days(value: int | str | None) -> list[int]:
     if value is None:
-        return None
+        return []
     if isinstance(value, str):
         cleaned = value.strip().lower()
+        if cleaned in DAILY_NAMES:
+            return list(range(7))
         if cleaned in DAY_NAMES:
-            return DAY_NAMES[cleaned]
+            return [DAY_NAMES[cleaned]]
     day = int(value)
     if 0 <= day <= 6:
-        return day
+        return [day]
     if 1 <= day <= 7:
-        return day % 7
-    return None
+        return [day % 7]
+    return []

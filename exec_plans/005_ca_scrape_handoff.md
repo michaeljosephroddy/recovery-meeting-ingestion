@@ -439,3 +439,37 @@ Replacement snapshot:
 - Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
 - Output: `snapshots/meetings-2026-05-23T215857Z.json` and `snapshots/latest.json`.
 - Snapshot DB row: `49923b3e-4607-440f-bd4c-b00dde39baef`, `5,135` meetings, `1` blocked by review.
+
+## 2026-05-23 Warning Cleanup
+
+The remaining blocking Poland normalization failure was a daily meeting with `day: Codziennie`. Static HTML normalization now expands daily schedule labels to seven weekday occurrences while preserving the existing snapshot schema.
+
+Review flag cleanup:
+
+- Zoom-style meeting IDs are now treated as online meeting credentials instead of personal phone contacts.
+- Polish `Hasło` / `Haslo` password labels are included in online credential detection.
+- Additional single-timezone country mappings were added for direct world-service listings such as Malaysia, New Zealand, Peru, Suriname, Dominican Republic, Monaco, Iceland, Barbados, United Arab Emirates, Spain, South Africa, and Switzerland.
+
+Validation:
+
+- `.venv/bin/ruff check app tests`: passed.
+- `.venv/bin/mypy app`: passed.
+- `.venv/bin/pytest -q`: `103 passed, 10 skipped`.
+
+Final artifact replay:
+
+- Command: `.venv/bin/python -m app.cli import-artifacts scrape_artifacts/ca-wide-dry-run-20260522-final-fast --no-dry-run`
+- Records extracted: `2,356`.
+- Records fetched: `2,341`.
+- Candidates normalized: `2,341`.
+- Review flags: `1,133`.
+- Raw records stored: `0`, because the same raw record hashes had already been imported.
+- Canonical meetings upserted: `2,341`.
+- Open review flags after replay: `1,160` total, all warnings: `462` possible personal contact, `395` possible private online credential, `155` scrape low confidence, `148` missing timezone.
+- Open error flags after replay: `0`.
+
+Final snapshot:
+
+- Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
+- Output: `snapshots/meetings-2026-05-23T220707Z.json` and `snapshots/latest.json`.
+- Snapshot DB row: `de3e6f4b-4d52-4762-812c-287a67283559`, `5,136` meetings, `0` blocked by review.

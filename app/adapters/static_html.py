@@ -7,7 +7,7 @@ import httpx
 from app.adapters.base import AdapterPayloadError, RawMeeting
 from app.adapters.html_config import configured_selectors, extract_records_from_html
 from app.normalize.canonical import CanonicalMeetingCandidate, MeetingOccurrence
-from app.normalize.schedule import normalize_day, parse_time
+from app.normalize.schedule import normalize_days, parse_time
 from app.sources.registry import Source
 
 
@@ -53,17 +53,18 @@ class StaticHtmlAdapter:
 
     def normalize(self, raw: RawMeeting) -> CanonicalMeetingCandidate:
         payload = raw.payload
-        day = normalize_day(_string(payload.get("day")))
+        days = normalize_days(_string(payload.get("day")))
         start = parse_time(_string(payload.get("time")))
         timezone = _string(payload.get("timezone")) or self.source.config.get("timezone") or "UTC"
-        occurrences = []
-        if day is not None and start is not None:
-            occurrences.append(
+        occurrences: list[MeetingOccurrence] = []
+        if days and start is not None:
+            occurrences.extend(
                 MeetingOccurrence(
                     day_of_week=day,
                     start_time_local=start,
                     timezone=str(timezone),
                 )
+                for day in days
             )
         online_url = _string(payload.get("online_url"))
         phone = _string(payload.get("phone_join_info"))

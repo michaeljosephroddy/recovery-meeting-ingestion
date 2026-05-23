@@ -5,7 +5,10 @@ from app.normalize.canonical import CanonicalMeetingCandidate
 
 EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 PHONE_RE = re.compile(r"\b(?:\+?\d[\d .()/-]{7,}\d)\b")
-ZOOM_PASSCODE_RE = re.compile(r"\b(?:passcode|password|pwd)\s*[:#]?\s*\S+", re.IGNORECASE)
+ONLINE_CREDENTIAL_RE = re.compile(
+    r"\b(?:meeting\s*id|id|passcode|password|pwd|hasło|haslo)\s*[:#]?\s*\S+",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -27,7 +30,8 @@ def flags_for_candidate(candidate: CanonicalMeetingCandidate) -> list[ReviewFlag
         )
         if value
     )
-    if EMAIL_RE.search(notes) or PHONE_RE.search(notes):
+    contact_notes = ONLINE_CREDENTIAL_RE.sub(" ", notes)
+    if EMAIL_RE.search(contact_notes) or PHONE_RE.search(contact_notes):
         flags.append(
             ReviewFlag(
                 code="possible_personal_contact",
@@ -36,7 +40,7 @@ def flags_for_candidate(candidate: CanonicalMeetingCandidate) -> list[ReviewFlag
                 source_record_id=candidate.source_record_id,
             )
         )
-    if ZOOM_PASSCODE_RE.search(notes):
+    if ONLINE_CREDENTIAL_RE.search(notes):
         flags.append(
             ReviewFlag(
                 code="possible_private_online_credential",
@@ -68,4 +72,3 @@ def flag_source_drop(previous_active_count: int, current_active_count: int) -> R
             message="source dropped more than 20 percent of previous active meetings",
         )
     return None
-

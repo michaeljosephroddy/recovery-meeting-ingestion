@@ -22,6 +22,25 @@ def test_review_flags_sensitive_contact_and_missing_timezone() -> None:
     assert "missing_timezone" in codes
 
 
+def test_review_flags_do_not_treat_meeting_id_as_personal_phone() -> None:
+    candidate = CanonicalMeetingCandidate(
+        fellowship="ca",
+        source_id="ca-online",
+        source_record_id="online",
+        source_url="https://example.org/meetings",
+        name="Online Meeting",
+        meeting_type="online",
+        phone_join_info="Zoom: Meeting ID: 263 748 3832 Haslo: Nadzieja",
+        occurrences=[
+            MeetingOccurrence(day_of_week=1, start_time_local="08:00", timezone="Europe/Warsaw")
+        ],
+    )
+
+    codes = {flag.code for flag in flags_for_candidate(candidate)}
+    assert "possible_private_online_credential" in codes
+    assert "possible_personal_contact" not in codes
+
+
 def test_review_flags_source_drop_over_twenty_percent() -> None:
     flag = flag_source_drop(previous_active_count=100, current_active_count=79)
 
@@ -48,4 +67,3 @@ def test_snapshot_excludes_raw_payloads() -> None:
 
     assert "payload" not in str(dumped)
     assert dumped["meetings"][0]["source_record_id"] == "daily-reflection"
-

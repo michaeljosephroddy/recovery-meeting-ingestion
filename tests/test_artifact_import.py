@@ -94,3 +94,60 @@ def test_artifact_import_uses_stored_source_config_timezone(tmp_path) -> None:
 
     assert result.ingest.candidates[0].occurrences[0].timezone == "America/Phoenix"
     assert [flag.code for flag in result.ingest.review_flags] == []
+
+
+def test_artifact_import_expands_daily_meeting_to_all_weekdays(tmp_path) -> None:
+    source_dir = tmp_path / "ca-poland"
+    source_dir.mkdir()
+    summary_path = source_dir / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "source_id": "ca-poland",
+                "source_url": "https://ca-polska.example/",
+                "status": "succeeded",
+                "pages_visited": 1,
+                "records_extracted": 1,
+                "pages": [
+                    {
+                        "url": "https://ca-polska.example/spotkania/",
+                        "final_url": "https://ca-polska.example/spotkania/",
+                        "extracted": [
+                            {
+                                "payload": {
+                                    "name": "Poranna Medytacja",
+                                    "day": "Codziennie",
+                                    "time": "08:00",
+                                    "phone_join_info": "Zoom: Meeting ID: 263 748 3832",
+                                },
+                                "method": "heuristic_day_section",
+                                "confidence": 0.84,
+                                "signals": ["day", "time", "name", "online"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = import_artifact_summary(
+        summary_path,
+        Settings(),
+        source_metadata={"country": "Poland"},
+    )
+
+    assert [occurrence.day_of_week for occurrence in result.ingest.candidates[0].occurrences] == [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+    ]
+    assert result.ingest.candidates[0].occurrences[0].timezone == "Europe/Warsaw"
+    assert [flag.code for flag in result.ingest.review_flags] == [
+        "possible_private_online_credential",
+    ]
