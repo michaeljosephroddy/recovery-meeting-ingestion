@@ -140,6 +140,46 @@ def test_extract_meetings_from_table_time_with_day_and_platform() -> None:
     assert meetings[0].payload["phone_join_info"] == "Zoom"
 
 
+def test_extract_meetings_from_tab_separated_schedule_text() -> None:
+    html = """
+    <main>
+      <p>5</p>
+      <p>
+        \tSU04\t\tSunday\t6:45 AM\tOnline Early Birds\tOnline Only\t\t
+        Sunland Park\tNM\t88063\tClosed\tWest\tOnline\t
+      </p>
+      <p>https://zoom.us/j/89727100190?pwd=260026</p>
+      <p>\tMeeting I.D. : 897 2710 0190 | Password: 260026\t\t\t\t</p>
+      <p>aaelpasotx</p>
+      <p>6</p>
+      <p>\tSU05\t\tSunday\t8:30 AM\tAlta Vista Men's Stag\t</p>
+      <p>Bowling Family Recovery Center</p>
+      <p>\t3501 Hueco St\tEl Paso\tTX\t79903\tClosed\tCentral\tDoor on Grama\t\t\t\t\t\t</p>
+      <p>aaelpasotx</p>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/elp-meetings",
+    )
+
+    assert [meeting.method for meeting in meetings] == [
+        "heuristic_tab_separated_schedule",
+        "heuristic_tab_separated_schedule",
+    ]
+    assert meetings[0].payload["source_record_id"] == "SU04"
+    assert meetings[0].payload["name"] == "Online Early Birds"
+    assert meetings[0].payload["online_url"] == "https://zoom.us/j/89727100190?pwd=260026"
+    assert "Password: 260026" in meetings[0].payload["phone_join_info"]
+    assert meetings[1].payload["name"] == "Alta Vista Men's Stag"
+    assert meetings[1].payload["venue_name"] == "Bowling Family Recovery Center"
+    assert meetings[1].payload["address_line1"] == "3501 Hueco St"
+    assert meetings[1].payload["city"] == "El Paso"
+    assert meetings[1].payload["region"] == "TX"
+    assert all(meeting.confidence >= 0.75 for meeting in meetings)
+
+
 def test_extract_meetings_from_rendered_bmlt_table() -> None:
     html = """
     <table class="bmlt-table">
@@ -304,6 +344,151 @@ def test_extract_day_section_splits_inline_online_meeting_name() -> None:
     assert meetings[0].payload["name"] == "Wake Up Group"
     assert "Meeting ID: 970 0504 0229" in meetings[0].payload["phone_join_info"]
     assert meetings[0].payload["online_url"] == "https://us06web.zoom.us/j/97005040229"
+    assert meetings[0].confidence >= 0.75
+
+
+def test_extract_day_section_splits_inline_phone_meeting_name() -> None:
+    html = """
+    <article>
+      <div class="entry-content">
+        <h3>Tuesday</h3>
+        <p>5:30 pm A Way Home - 12&amp;12 Study 425-436-6314 Passcode: 587867#</p>
+      </div>
+    </article>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/telephone-meetings",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].payload["name"] == "A Way Home - 12&12 Study"
+    assert "425-436-6314" in meetings[0].payload["phone_join_info"]
+    assert "Passcode: 587867#" in meetings[0].payload["phone_join_info"]
+    assert meetings[0].confidence >= 0.75
+
+
+def test_extract_day_section_splits_inline_labeled_remote_meeting_name() -> None:
+    html = """
+    <article>
+      <div class="entry-content">
+        <h3>Wednesday</h3>
+        <p>
+          Wednesday Men's Stag Type: Closed / Hybrid Time: Wednesdays, 7pm
+          https://us04web.zoom.us/j/457213547 Meeting ID: 457 213 547 password:1935
+        </p>
+      </div>
+    </article>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/remote-meetings",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].payload["name"] == "Wednesday Men's Stag"
+    assert meetings[0].payload["online_url"] == "https://us04web.zoom.us/j/457213547"
+    assert "Meeting ID: 457 213 547" in meetings[0].payload["phone_join_info"]
+    assert "password:1935" in meetings[0].payload["phone_join_info"]
+    assert meetings[0].confidence >= 0.75
+
+
+def test_extract_day_section_splits_german_connection_markers() -> None:
+    html = """
+    <article>
+      <div class="entry-content">
+        <h3>Montag</h3>
+        <p>19:00 Uhr Mainz Telefonmeeting 03052014351 Pin 122612#</p>
+      </div>
+    </article>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/onlinemeetings/termin-gebunden/",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].payload["name"] == "Mainz"
+    assert "Telefonmeeting 03052014351" in meetings[0].payload["phone_join_info"]
+    assert "Pin 122612#" in meetings[0].payload["phone_join_info"]
+    assert meetings[0].confidence >= 0.75
+
+
+def test_extract_day_section_keeps_zoom_name_before_german_meeting_id() -> None:
+    html = """
+    <article>
+      <div class="entry-content">
+        <h3>Mittwoch</h3>
+        <p>19:30 Uhr Zoom-Beginner-Meeting Zoom Meetings ID: 242 424 1313 Passwort anfragen</p>
+      </div>
+    </article>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/onlinemeetings/termin-gebunden/",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].payload["name"] == "Zoom-Beginner-Meeting"
+    assert "Zoom Meetings ID: 242 424 1313" in meetings[0].payload["phone_join_info"]
+    assert meetings[0].confidence >= 0.75
+
+
+def test_extract_day_section_splits_german_dial_in_code() -> None:
+    html = """
+    <article>
+      <div class="entry-content">
+        <h3>Samstag</h3>
+        <p>08:00 Uhr AArlybird Literaturmeeting Einwahl-Nr. : Germany 030 52014351 Code: 758449#</p>
+      </div>
+    </article>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/onlinemeetings/termin-gebunden/",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].payload["name"] == "AArlybird Literaturmeeting"
+    assert "Einwahl-Nr. : Germany 030 52014351" in meetings[0].payload["phone_join_info"]
+    assert "Code: 758449#" in meetings[0].payload["phone_join_info"]
+    assert meetings[0].confidence >= 0.75
+
+
+def test_extract_day_section_applies_meeting_page_context_to_schedule_rows() -> None:
+    html = """
+    <main>
+      <div class="entry-content">
+        <h1>Grupo 2 De Febrero</h1>
+        <p>Meeting Information</p>
+        <p>Saturday 7:00 PM - 8:30 PM PDT</p>
+        <p>In-person</p>
+        <p>Open</p>
+        <p>Spanish</p>
+        <p>TEL: (831)613-2339. (831)776-2023.</p>
+        <p>321 El Camino Real, Greenfield, CA 93927, USA</p>
+        <p>Greenfield</p>
+        <h3>Monday</h3>
+        <p>7:00 PM Grupo 2 De Febrero</p>
+      </div>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/meetings/grupo-2-de-febrero/",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].payload["name"] == "Grupo 2 De Febrero"
+    assert meetings[0].payload["address_line1"] == "321 El Camino Real, Greenfield, CA 93927, USA"
+    assert meetings[0].payload["city"] == "Greenfield"
+    assert "TEL: (831)613-2339. (831)776-2023." in meetings[0].payload["phone_join_info"]
     assert meetings[0].confidence >= 0.75
 
 

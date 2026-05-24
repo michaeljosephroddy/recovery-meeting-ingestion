@@ -27,6 +27,11 @@ TIME_RANGE_TRAILING_MARKER_RE = re.compile(
     r"\d{1,2}(?::|\.|;)\d{2}\s*(?P<marker>am|pm|a\.m\.|p\.m\.)\b",
     re.IGNORECASE,
 )
+NAME_TIME_RE = re.compile(
+    r"\b(?:\d{1,2}(?::|\.|;)?\d{0,2}\s*(?:am|pm|a\.m\.|p\.m\.)|"
+    r"\d{1,2}(?::|\.|;)\d{2})\b",
+    re.IGNORECASE,
+)
 ADDRESS_RE = re.compile(
     r"\b(?:\d{1,6}(?:st|nd|rd|th)?\s+[A-Za-z0-9'.\s-]{1,60}"
     r"(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|"
@@ -94,6 +99,9 @@ def extract_meetings_from_html(
     extracted.extend(_extract_tsml_tables(soup, source_page_url, page_score))
     extracted.extend(_extract_bmlt_tables(soup, source_page_url, page_score))
     extracted.extend(_extract_tables(soup, source_page_url, page_score))
+    tab_separated = _extract_tab_separated_schedule(soup, source_page_url, page_score)
+    if tab_separated:
+        return _dedupe_extracted([*extracted, *tab_separated])
     extracted.extend(_extract_cards(soup, source_page_url, page_score))
     extracted.extend(_extract_day_sections(soup, source_page_url, page_score))
     if not extracted:
@@ -428,6 +436,129 @@ def _extract_bmlt_tables(
     return meetings
 
 
+def _extract_tab_separated_schedule(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    lines = soup.get_text("\n").splitlines()
+    meetings: list[ExtractedMeeting] = []
+    index = 0
+    row_index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not _is_tab_separated_schedule_start(line):
+            index += 1
+            continue
+        block: list[str] = [line]
+        index += 1
+        while index < len(lines):
+            next_line = lines[index]
+            stripped = next_line.strip()
+            if _is_tab_separated_schedule_start(next_line):
+                break
+            if stripped == "aaelpasotx":
+                index += 1
+                break
+            if stripped and not stripped.isdigit() and not _is_empty_tab_line(next_line):
+                block.append(next_line)
+            index += 1
+
+        payload = _payload_from_tab_separated_schedule_block(block)
+        payload = _without_empty(payload)
+        if not _looks_like_meeting_payload(payload):
+            continue
+        confidence, signals = confidence_for_payload(
+            payload,
+            method="heuristic_tab_separated_schedule",
+            page_score=page_score,
+            repeated_structure=True,
+            table_headers=True,
+        )
+        meetings.append(
+            ExtractedMeeting(
+                payload={**payload, "row_index": row_index},
+                method="heuristic_tab_separated_schedule",
+                confidence=max(confidence, 0.82),
+                source_page_url=source_page_url,
+                signals=signals,
+                selector_hint="tab_separated_schedule",
+            )
+        )
+        row_index += 1
+    return meetings
+
+
+def _is_tab_separated_schedule_start(line: str) -> bool:
+    cells = line.split("\t")
+    return bool(
+        len(cells) >= 6
+        and re.fullmatch(r"[A-Z]{2}\d+", cells[1].strip() if len(cells) > 1 else "")
+        and _day_from_schedule_line(cells[3].strip() if len(cells) > 3 else "")
+        and _first_time_match(cells[4].strip() if len(cells) > 4 else "")
+    )
+
+
+def _is_empty_tab_line(line: str) -> bool:
+    return not line.replace("\t", "").strip()
+
+
+def _payload_from_tab_separated_schedule_block(block: list[str]) -> dict[str, Any]:
+    first = block[0].split("\t")
+    payload: dict[str, Any] = {
+        "source_record_id": _cell(first, 1),
+        "day": _cell(first, 3),
+        "time": _normalize_extracted_time(_cell(first, 4)),
+        "name": _cell(first, 5),
+        "venue_name": _cell(first, 6),
+        "address_line1": _cell(first, 7),
+        "city": _cell(first, 8),
+        "region": _cell(first, 9),
+    }
+    formats = [_cell(first, index) for index in (11, 12, 13) if _cell(first, index)]
+    if formats:
+        payload["formats"] = ", ".join(formats)
+
+    for line in block[1:]:
+        stripped = _clean_fragment(line)
+        if not stripped:
+            continue
+        if url := _meeting_url_or_none(stripped):
+            payload.setdefault("online_url", url)
+            continue
+        if _is_connection_line(stripped):
+            existing = str(payload.get("phone_join_info") or "")
+            cleaned = _clean_connection_line(stripped)
+            payload["phone_join_info"] = " ".join(
+                part for part in (existing, cleaned) if part
+            ).strip()
+            continue
+        continuation = [cell.strip() for cell in line.split("\t") if cell.strip()]
+        if not continuation:
+            continue
+        _merge_tab_schedule_continuation(payload, continuation)
+    return payload
+
+
+def _cell(cells: list[str], index: int) -> str:
+    return cells[index].strip() if len(cells) > index else ""
+
+
+def _merge_tab_schedule_continuation(payload: dict[str, Any], cells: list[str]) -> None:
+    if not payload.get("venue_name") and cells:
+        payload["venue_name"] = cells.pop(0)
+    if not payload.get("address_line1") and cells:
+        payload["address_line1"] = cells.pop(0)
+    if not payload.get("city") and cells:
+        payload["city"] = cells.pop(0)
+    if not payload.get("region") and cells:
+        payload["region"] = cells.pop(0)
+    extras = [cell for cell in cells[1:] if cell] if cells else []
+    if extras:
+        existing = str(payload.get("formats") or "")
+        payload["formats"] = ", ".join(part for part in (existing, *extras) if part).strip(", ")
+
+
 def _extract_cards(
     soup: BeautifulSoup,
     source_page_url: str,
@@ -495,6 +626,7 @@ def _extract_day_sections(
         lines = _day_section_lines(container)
         if not lines:
             continue
+        context = _day_section_context(lines)
         current_day = _day_from_title(container) or _day_from_title(soup)
         pending: dict[str, Any] | None = None
         pending_name: str | None = None
@@ -504,7 +636,13 @@ def _extract_day_sections(
             if day_heading:
                 if pending is not None:
                     _append_pending_day_section(
-                        meetings, pending, source_page_url, page_score, container_index, row_index
+                        meetings,
+                        pending,
+                        source_page_url,
+                        page_score,
+                        container_index,
+                        row_index,
+                        context,
                     )
                     row_index += 1
                     pending = None
@@ -515,7 +653,13 @@ def _extract_day_sections(
             if time and current_day:
                 if pending is not None:
                     _append_pending_day_section(
-                        meetings, pending, source_page_url, page_score, container_index, row_index
+                        meetings,
+                        pending,
+                        source_page_url,
+                        page_score,
+                        container_index,
+                        row_index,
+                        context,
                     )
                     row_index += 1
                 pending = {"day": current_day, "time": _normalize_extracted_time(time)}
@@ -530,7 +674,13 @@ def _extract_day_sections(
                 and _looks_like_next_meeting_name(line)
             ):
                 _append_pending_day_section(
-                    meetings, pending, source_page_url, page_score, container_index, row_index
+                    meetings,
+                    pending,
+                    source_page_url,
+                    page_score,
+                    container_index,
+                    row_index,
+                    context,
                 )
                 row_index += 1
                 pending = None
@@ -543,9 +693,71 @@ def _extract_day_sections(
                 pending_name = _clean_meeting_name_line(line)
         if pending is not None:
             _append_pending_day_section(
-                meetings, pending, source_page_url, page_score, container_index, row_index
+                meetings,
+                pending,
+                source_page_url,
+                page_score,
+                container_index,
+                row_index,
+                context,
             )
     return meetings
+
+
+def _day_section_context(lines: list[str]) -> dict[str, str]:
+    try:
+        info_index = next(
+            index for index, line in enumerate(lines) if line.lower() == "meeting information"
+        )
+    except StopIteration:
+        return {}
+
+    end_index = next(
+        (
+            index
+            for index, line in enumerate(lines[info_index + 1 :], start=info_index + 1)
+            if _day_heading_or_none(line) and not _first_time_match(line)
+        ),
+        len(lines),
+    )
+    context_lines = lines[max(0, info_index - 1) : end_index]
+    context: dict[str, str] = {}
+    connection_lines: list[str] = []
+    for index, line in enumerate(context_lines):
+        lowered = line.lower()
+        if _is_connection_line(line) or lowered.startswith(("contact", "phone", "tel", "whatsapp")):
+            connection_lines.append(_clean_connection_line(line))
+            continue
+        if not context.get("address_line1") and (
+            ADDRESS_RE.search(line)
+            or _looks_like_postal_city_line(line)
+            or _looks_like_context_address_line(line)
+        ):
+            context["address_line1"] = line
+            if index > 0:
+                venue = context_lines[index - 1]
+                if (
+                    not context.get("venue_name")
+                    and not ADDRESS_RE.search(venue)
+                    and not _is_instruction_line(venue)
+                    and not _looks_like_format_text(venue)
+                ):
+                    context["venue_name"] = venue
+            continue
+        if context.get("address_line1") and not context.get("city") and _looks_like_city_line(line):
+            context["city"] = line
+    if connection_lines:
+        context["phone_join_info"] = " ".join(line for line in connection_lines if line)
+    return context
+
+
+def _looks_like_context_address_line(line: str) -> bool:
+    if not any(char.isdigit() for char in line):
+        return False
+    return bool(
+        re.search(r"\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b", line)
+        or re.search(r",\s*[A-Za-z .'-]+,\s*[A-Z]{2}\b", line)
+    )
 
 
 def _extract_inline_schedule_lines(
@@ -1186,6 +1398,8 @@ def _merge_time_line_remainder(payload: dict[str, Any], line: str, time: str) ->
         return
     if _merge_inline_named_detail(payload, remainder):
         return
+    if not payload.get("name") and _set_inline_name(payload, remainder):
+        return
     _merge_day_section_line(payload, remainder)
 
 
@@ -1195,6 +1409,13 @@ def _merge_inline_named_detail(payload: dict[str, Any], line: str) -> bool:
     cleaned = _clean_inline_named_detail(line)
     if not cleaned:
         return False
+
+    detail_label_split = _split_before_detail_label(cleaned)
+    if detail_label_split is not None:
+        name, detail = detail_label_split
+        if _set_inline_name(payload, name):
+            _merge_day_section_line(payload, detail)
+            return True
 
     connection_split = _split_before_connection_marker(cleaned)
     if connection_split is not None:
@@ -1245,7 +1466,10 @@ def _merge_inline_location_detail(payload: dict[str, Any], detail: str) -> None:
 
 def _split_before_connection_marker(line: str) -> tuple[str, str] | None:
     match = re.search(
-        r"\b(?:zoom|telephone|phone|tel\.?|meeting\s+id|join\s+(?:zoom\s+)?meeting)\b",
+        r"(?:\b(?:telephone|phone|tel\.?|meeting\s+id|join\s+(?:zoom\s+)?meeting|"
+        r"passcode|password|access\s+code|telefon(?:meeting)?|pin|kenncode|passwort)\b|"
+        r"meeting[-\s]*id|zoom[-\s]*meetings?[-\s]*id|einwahl[-\s]*nr\.?|\bcode\s*:|"
+        r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4})",
         line,
         flags=re.IGNORECASE,
     )
@@ -1254,12 +1478,51 @@ def _split_before_connection_marker(line: str) -> tuple[str, str] | None:
     return line[: match.start()], line[match.start() :]
 
 
+def _split_before_detail_label(line: str) -> tuple[str, str] | None:
+    match = re.search(r"\b(?:type|format|time)\s*:", line, flags=re.IGNORECASE)
+    if match is None or match.start() <= 0:
+        return None
+    return line[: match.start()], line[match.start() :]
+
+
 def _set_inline_name(payload: dict[str, Any], name: str) -> bool:
-    cleaned = _clean_meeting_name_line(name)
+    cleaned = _clean_inline_meeting_name_candidate(name)
     if not cleaned or not _looks_like_inline_meeting_name(cleaned):
         return False
     payload["name"] = cleaned
     return True
+
+
+def _clean_inline_meeting_name_candidate(name: str) -> str:
+    cleaned = _clean_meeting_name_line(name)
+    cleaned = re.split(
+        r"\b(?:dauer|jeden|barrierefrei|offenes\s+meeting|zoom[-\s]*meeting|"
+        r"einwahl[-\s]*nr\.?)\b",
+        cleaned,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    cleaned = re.split(r"\b\d{5}\b", cleaned, maxsplit=1)[0]
+    day_words = "|".join(
+        f"{day.lower()}s?" for day in DAY_INDEX_NAMES.values()
+    )
+    cleaned = _clean_fragment(NAME_TIME_RE.sub("", cleaned))
+    cleaned = re.sub(
+        r"^(?:daily|everyday|en\s+espanol|en\s+español)\b\s*[,:-]?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    leading_day = re.match(rf"^(?:{day_words})\b\s*[,:-]?\s*", cleaned, flags=re.IGNORECASE)
+    if leading_day is not None and leading_day.group(0).strip(" ,:-").isupper():
+        cleaned = cleaned[leading_day.end() :]
+    cleaned = re.sub(
+        rf"\s*[,:-]?\s*(?:{day_words})$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", cleaned).strip(TEXT_STRIP_CHARS)
 
 
 def _looks_like_inline_meeting_name(name: str) -> bool:
@@ -1268,7 +1531,9 @@ def _looks_like_inline_meeting_name(name: str) -> bool:
         return False
     if not any(char.isalpha() for char in name):
         return False
-    if TIME_RE.search(name) or DAY_RE.search(name):
+    if TIME_RE.search(name):
+        return False
+    if _day_heading_or_none(name):
         return False
     return len(name) <= 120
 
@@ -1285,8 +1550,14 @@ def _merge_day_section_line(payload: dict[str, Any], line: str) -> None:
     if (
         "zoom" in lowered
         or "meeting id" in lowered
+        or "meeting-id" in lowered
         or "passcode" in lowered
         or "hasło" in lowered
+        or "kenncode" in lowered
+        or "passwort" in lowered
+        or "telefonmeeting" in lowered
+        or "einwahl-nr" in lowered
+        or "code:" in lowered
         or lowered.startswith(("contact", "phone", "tel", "whatsapp"))
     ):
         existing = str(payload.get("phone_join_info") or "")
@@ -1599,8 +1870,14 @@ def _is_connection_line(line: str) -> bool:
             "access code",
             "click here",
             "meeting id",
+            "meeting-id",
             "passcode",
             "password",
+            "kenncode",
+            "passwort",
+            "telefonmeeting",
+            "einwahl-nr",
+            "code:",
             "zoom",
         )
     )
@@ -1624,7 +1901,21 @@ def _looks_like_address_fallback(line: str) -> bool:
     lowered = line.lower()
     if "@" in line or _is_timezone_only_line(line):
         return False
-    if any(term in lowered for term in ("meeting id", "passcode", "hasło", "contact")):
+    if any(
+        term in lowered
+        for term in (
+            "meeting id",
+            "meeting-id",
+            "passcode",
+            "hasło",
+            "kenncode",
+            "passwort",
+            "telefonmeeting",
+            "einwahl-nr",
+            "code:",
+            "contact",
+        )
+    ):
         return False
     return any(char.isdigit() for char in line) and len(line) <= 180
 
@@ -1714,8 +2005,9 @@ def _append_pending_day_section(
     page_score: float,
     container_index: int,
     row_index: int,
+    context: dict[str, str] | None = None,
 ) -> None:
-    cleaned = _without_empty(payload)
+    cleaned = _without_empty(_with_day_section_context(payload, context or {}))
     if not _looks_like_meeting_payload(cleaned):
         return
     confidence, signals = confidence_for_payload(
@@ -1734,6 +2026,20 @@ def _append_pending_day_section(
             selector_hint=f"day_section:{container_index}",
         )
     )
+
+
+def _with_day_section_context(
+    payload: dict[str, Any],
+    context: dict[str, str],
+) -> dict[str, Any]:
+    if not context:
+        return payload
+    enriched: dict[str, Any] = {**context, **payload}
+    context_phone = str(context.get("phone_join_info") or "").strip()
+    payload_phone = str(payload.get("phone_join_info") or "").strip()
+    if context_phone and payload_phone and context_phone.lower() not in payload_phone.lower():
+        enriched["phone_join_info"] = f"{context_phone} {payload_phone}"
+    return enriched
 
 
 def _meeting_url_or_none(url: str) -> str | None:
