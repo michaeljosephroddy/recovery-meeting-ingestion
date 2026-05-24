@@ -93,6 +93,76 @@ def test_static_html_adapter_infers_canada_timezone_from_address() -> None:
     assert candidate.occurrences[0].timezone == "America/Toronto"
 
 
+def test_static_html_adapter_infers_mexico_timezone_from_address_and_region() -> None:
+    source = static_source().model_copy(update={"country": None, "config": {}})
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="mexico-row",
+        source_url=source.url,
+        payload={
+            "name": "Puerto Vallarta Sunday",
+            "day": "Sunday",
+            "time": "9:00 am",
+            "address_line1": "Libertad 105, Centro, 48300 Puerto Vallarta, Jal., Mexico",
+            "region": "Jalisco",
+            "timezone": "UTC",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.country == "Mexico"
+    assert candidate.region == "Jalisco"
+    assert candidate.occurrences[0].timezone == "America/Mexico_City"
+
+
+def test_static_html_adapter_infers_us_timezone_from_address() -> None:
+    source = static_source().model_copy(update={"country": None, "config": {}})
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="new-york-row",
+        source_url=source.url,
+        payload={
+            "name": "Honesty Group",
+            "day": "Tuesday",
+            "time": "7:00 pm",
+            "address_line1": "4897a NY-56, Colton, NY 13625, USA",
+            "region": "Eastern Ontario 83",
+            "timezone": "UTC",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.country == "United States"
+    assert candidate.region == "Eastern Ontario 83"
+    assert candidate.occurrences[0].timezone == "America/New_York"
+
+
+def test_static_html_adapter_infers_timezone_from_region_hint() -> None:
+    source = static_source().model_copy(update={"country": None, "config": {}})
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="geneva-row",
+        source_url=source.url,
+        payload={
+            "name": "Geneva Sunday",
+            "day": "Sunday",
+            "time": "9:00 am",
+            "address_line1": "Rue du Vieux-Billard 21",
+            "region": "Geneva",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.region == "Geneva"
+    assert candidate.occurrences[0].timezone == "Europe/Zurich"
+
+
 async def test_static_html_adapter_fetch_uses_transport() -> None:
     source = static_source()
     adapter = StaticHtmlAdapter(

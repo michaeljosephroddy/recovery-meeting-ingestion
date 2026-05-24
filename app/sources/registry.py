@@ -136,12 +136,102 @@ BRAZIL_REGION_TIMEZONES = {
     "Sp": "America/Sao_Paulo",
 }
 
+MEXICO_REGION_TIMEZONES = {
+    "B.C.": "America/Tijuana",
+    "B.C.S.": "America/Mazatlan",
+    "Baja California": "America/Tijuana",
+    "Baja California Norte": "America/Tijuana",
+    "Baja California Sur": "America/Mazatlan",
+    "Cdmx": "America/Mexico_City",
+    "Colima": "America/Mexico_City",
+    "Guerrero": "America/Mexico_City",
+    "Gto": "America/Mexico_City",
+    "Guanajuato": "America/Mexico_City",
+    "Jal": "America/Mexico_City",
+    "Jalisco": "America/Mexico_City",
+    "Mich": "America/Mexico_City",
+    "Michoacán": "America/Mexico_City",
+    "Michoacan": "America/Mexico_City",
+    "Mexico": "America/Mexico_City",
+    "Nay": "America/Mazatlan",
+    "Nayarit": "America/Mazatlan",
+    "Nayarit South": "America/Mazatlan",
+    "Oax": "America/Mexico_City",
+    "Oaxaca": "America/Mexico_City",
+    "Q.R.": "America/Cancun",
+    "Qro": "America/Mexico_City",
+    "Queretaro": "America/Mexico_City",
+    "Quintana Roo": "America/Cancun",
+    "Sin": "America/Mazatlan",
+    "Sinaloa": "America/Mazatlan",
+    "Sonora": "America/Hermosillo",
+}
+
+REGION_TIMEZONE_HINTS = {
+    "Amsterdam": "Europe/Amsterdam",
+    "Athens": "Europe/Athens",
+    "Auckland": "Pacific/Auckland",
+    "Geneva": "Europe/Zurich",
+    "Mons": "Europe/Brussels",
+    "Munich": "Europe/Berlin",
+    "Paris": "Europe/Paris",
+    "Rotterdam": "Europe/Amsterdam",
+    "Vienna": "Europe/Vienna",
+}
+
+SOURCE_TEXT_TIMEZONE_HINTS = {
+    "aa oficina del area de p.r.": "America/Puerto_Rico",
+    "aaparis.org": "Europe/Paris",
+    "aastjohns.com": "America/St_Johns",
+    "aaauckland.org": "Pacific/Auckland",
+    "abbotsford": "America/Vancouver",
+    "abu dhabi": "Asia/Dubai",
+    "aayellowknife": "America/Yellowknife",
+    "area82aa": "America/Halifax",
+    "ballarat": "Australia/Melbourne",
+    "berlin": "Europe/Berlin",
+    "cambodia": "Asia/Phnom_Penh",
+    "capital federal": "America/Argentina/Buenos_Aires",
+    "auckland": "Pacific/Auckland",
+    "cayman islands": "America/Cayman",
+    "cebu": "Asia/Manila",
+    "comite de area": "America/Puerto_Rico",
+    "cyprus": "Asia/Nicosia",
+    "dumaguete": "Asia/Manila",
+    "dunedin": "Pacific/Auckland",
+    "eastern georgian bay": "America/Toronto",
+    "greek central office": "Europe/Athens",
+    "greater vancouver": "America/Vancouver",
+    "gvís greater vancouver": "America/Vancouver",
+    "gvis greater vancouver": "America/Vancouver",
+    "hamilton": "America/Toronto",
+    "huntsville, parry sound": "America/Toronto",
+    "kansai": "Asia/Tokyo",
+    "kenya": "Africa/Nairobi",
+    "kerala": "Asia/Kolkata",
+    "kingston jamaica": "America/Jamaica",
+    "lanzarote": "Atlantic/Canary",
+    "london area intergroup": "Europe/London",
+    "mumbai": "Asia/Kolkata",
+    "oficina del area de p.r.": "America/Puerto_Rico",
+    "phuket": "Asia/Bangkok",
+    "port elizabeth": "Africa/Johannesburg",
+    "port of spain": "America/Port_of_Spain",
+    "red deer": "America/Edmonton",
+    "st. johns intergroup": "America/St_Johns",
+    "victoria/haliburton": "America/Toronto",
+    "western cape": "Africa/Johannesburg",
+}
+
 COUNTRY_TIMEZONES = {
+    "argentina": "America/Argentina/Buenos_Aires",
     "barbados": "America/Barbados",
     "belgium": "Europe/Brussels",
     "belize": "America/Belize",
     "bulgaria": "Europe/Sofia",
     "costa rica": "America/Costa_Rica",
+    "cayman islands": "America/Cayman",
+    "cyprus": "Asia/Nicosia",
     "czechia": "Europe/Prague",
     "dominican republic": "America/Santo_Domingo",
     "denmark": "Europe/Copenhagen",
@@ -149,27 +239,38 @@ COUNTRY_TIMEZONES = {
     "france": "Europe/Paris",
     "germany": "Europe/Berlin",
     "greece": "Europe/Athens",
+    "guyana": "America/Guyana",
     "hong kong": "Asia/Hong_Kong",
     "iceland": "Atlantic/Reykjavik",
     "ie": "Europe/Dublin",
     "ireland": "Europe/Dublin",
+    "kazakhstan": "Asia/Almaty",
+    "kenya": "Africa/Nairobi",
+    "jamaica": "America/Jamaica",
     "malaysia": "Asia/Kuala_Lumpur",
+    "malta": "Europe/Malta",
+    "mexico": "America/Mexico_City",
     "monaco": "Europe/Monaco",
     "netherlands": "Europe/Amsterdam",
     "new zealand": "Pacific/Auckland",
     "norway": "Europe/Oslo",
     "peru": "America/Lima",
+    "philippines": "Asia/Manila",
     "poland": "Europe/Warsaw",
     "portugal": "Europe/Lisbon",
+    "puerto rico": "America/Puerto_Rico",
     "south africa": "Africa/Johannesburg",
     "spain": "Europe/Madrid",
     "suriname": "America/Paramaribo",
     "switzerland": "Europe/Zurich",
     "sweden": "Europe/Stockholm",
     "thailand": "Asia/Bangkok",
+    "trinidad and tobago": "America/Port_of_Spain",
+    "trinidad & tobago": "America/Port_of_Spain",
     "united arab emirates": "Asia/Dubai",
     "uk": "Europe/London",
     "united kingdom": "Europe/London",
+    "uruguay": "America/Montevideo",
 }
 
 
@@ -271,7 +372,10 @@ def timezone_for_candidate(
     *,
     inferred_region: str | None = None,
 ) -> str | None:
-    return timezone_for_country_region(candidate.country, inferred_region or candidate.region)
+    return timezone_for_country_region(
+        candidate.country,
+        inferred_region or candidate.region,
+    ) or timezone_for_source_text(candidate.label, str(candidate.url))
 
 
 def timezone_for_country_region(country: str | None, region: str | None = None) -> str | None:
@@ -285,8 +389,20 @@ def timezone_for_country_region(country: str | None, region: str | None = None) 
         return AUSTRALIA_REGION_TIMEZONES.get(region_title)
     if country_lower == "brazil" and region_title:
         return BRAZIL_REGION_TIMEZONES.get(region_title)
+    if country_lower == "mexico" and region_title:
+        return MEXICO_REGION_TIMEZONES.get(region_title)
     if timezone := COUNTRY_TIMEZONES.get(country_lower):
         return timezone
+    if not country_lower and region_title:
+        return REGION_TIMEZONE_HINTS.get(region_title)
+    return None
+
+
+def timezone_for_source_text(label: str | None, url: str | None = None) -> str | None:
+    text = f"{label or ''} {url or ''}".casefold()
+    for marker, timezone in SOURCE_TEXT_TIMEZONE_HINTS.items():
+        if marker.casefold() in text:
+            return timezone
     return None
 
 

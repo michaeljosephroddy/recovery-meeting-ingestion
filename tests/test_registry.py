@@ -4,6 +4,7 @@ from app.sources.registry import (
     source_from_candidate,
     source_id_for_candidate,
     timezone_for_country_region,
+    timezone_for_source_text,
 )
 
 
@@ -81,3 +82,28 @@ def test_timezone_for_country_region_handles_brazil_region_abbreviation() -> Non
 
 def test_timezone_for_country_region_handles_canadian_province_abbreviation() -> None:
     assert timezone_for_country_region("Canada", "QC") == "America/Toronto"
+
+
+def test_timezone_for_country_region_handles_mexican_state() -> None:
+    assert timezone_for_country_region("Mexico", "Jalisco") == "America/Mexico_City"
+    assert timezone_for_country_region("Mexico", "Quintana Roo") == "America/Cancun"
+    assert timezone_for_country_region("Mexico", "Sinaloa") == "America/Mazatlan"
+
+
+def test_timezone_for_country_region_handles_city_hint_without_country() -> None:
+    assert timezone_for_country_region(None, "Geneva") == "Europe/Zurich"
+
+
+def test_timezone_for_source_text_handles_clear_single_region_sources() -> None:
+    assert timezone_for_source_text("Cyprus Intergroup", "https://example.org") == "Asia/Nicosia"
+    assert (
+        timezone_for_source_text("Port Of Spain Intergroup Of A.A.", "https://example.org")
+        == "America/Port_of_Spain"
+    )
+    assert timezone_for_source_text("District 35 Area 78", "http://aayellowknife.ca") == (
+        "America/Yellowknife"
+    )
+    assert (
+        timezone_for_source_text("Kingston Jamaica Answering Service", "https://example.org")
+        == "America/Jamaica"
+    )

@@ -8,7 +8,66 @@ from app.adapters.base import AdapterPayloadError, RawMeeting
 from app.adapters.html_config import configured_selectors, extract_records_from_html
 from app.normalize.canonical import CanonicalMeetingCandidate, MeetingOccurrence
 from app.normalize.schedule import normalize_days, parse_time
-from app.sources.registry import Source, timezone_for_country_region
+from app.sources.registry import (
+    COUNTRY_TIMEZONES,
+    US_REGION_TIMEZONES,
+    Source,
+    timezone_for_country_region,
+)
+
+US_REGION_ABBREVIATIONS = {
+    "AL": "Alabama",
+    "AK": "Alaska",
+    "AZ": "Arizona",
+    "AR": "Arkansas",
+    "CA": "California",
+    "CO": "Colorado",
+    "CT": "Connecticut",
+    "DE": "Delaware",
+    "DC": "District Of Columbia",
+    "FL": "Florida",
+    "GA": "Georgia",
+    "HI": "Hawaii",
+    "ID": "Idaho",
+    "IL": "Illinois",
+    "IN": "Indiana",
+    "IA": "Iowa",
+    "KS": "Kansas",
+    "KY": "Kentucky",
+    "LA": "Louisiana",
+    "ME": "Maine",
+    "MD": "Maryland",
+    "MA": "Massachusetts",
+    "MI": "Michigan",
+    "MN": "Minnesota",
+    "MS": "Mississippi",
+    "MO": "Missouri",
+    "MT": "Montana",
+    "NE": "Nebraska",
+    "NV": "Nevada",
+    "NH": "New Hampshire",
+    "NJ": "New Jersey",
+    "NM": "New Mexico",
+    "NY": "New York",
+    "NC": "North Carolina",
+    "ND": "North Dakota",
+    "OH": "Ohio",
+    "OK": "Oklahoma",
+    "OR": "Oregon",
+    "PA": "Pennsylvania",
+    "RI": "Rhode Island",
+    "SC": "South Carolina",
+    "SD": "South Dakota",
+    "TN": "Tennessee",
+    "TX": "Texas",
+    "UT": "Utah",
+    "VT": "Vermont",
+    "VA": "Virginia",
+    "WA": "Washington",
+    "WV": "West Virginia",
+    "WI": "Wisconsin",
+    "WY": "Wyoming",
+}
 
 CANADA_REGION_ABBREVIATIONS = {
     "AB",
@@ -24,6 +83,24 @@ CANADA_REGION_ABBREVIATIONS = {
     "QC",
     "SK",
     "YT",
+}
+
+MEXICO_REGION_ABBREVIATIONS = {
+    "BC": "B.C.",
+    "BCS": "B.C.S.",
+    "CDMX": "Cdmx",
+    "COL": "Colima",
+    "GRO": "Guerrero",
+    "GTO": "Gto",
+    "JAL": "Jalisco",
+    "MICH": "Michoacán",
+    "NAY": "Nayarit",
+    "OAX": "Oax",
+    "QR": "Quintana Roo",
+    "Q.R": "Quintana Roo",
+    "QRO": "Qro",
+    "SIN": "Sinaloa",
+    "SON": "Sonora",
 }
 
 
@@ -75,10 +152,12 @@ class StaticHtmlAdapter:
         inferred_country, inferred_region = _country_region_from_address(address_line1)
         country = _string(payload.get("country")) or self.source.country
         region = _string(payload.get("region")) or self.source.region
+        payload_timezone = _string(payload.get("timezone"))
         timezone = (
-            _string(payload.get("timezone"))
+            (payload_timezone if payload_timezone != "UTC" else None)
             or self.source.config.get("timezone")
             or timezone_for_country_region(country, region)
+            or timezone_for_country_region(inferred_country, region)
             or timezone_for_country_region(inferred_country, inferred_region)
             or "UTC"
         )
@@ -147,13 +226,29 @@ def _country_region_from_address(address: str | None) -> tuple[str | None, str |
     if not address:
         return None, None
     parts = [part.strip() for part in address.replace("\n", ",").split(",")]
-    country = "Canada" if any(part.lower() == "canada" for part in parts) else None
+    country = _country_from_address_parts(parts)
     for part in parts:
         tokens = [token.strip(" .").upper() for token in part.split()]
         for token in tokens:
+            if country == "United States" and token in US_REGION_ABBREVIATIONS:
+                return country or "United States", US_REGION_ABBREVIATIONS[token]
             if token in CANADA_REGION_ABBREVIATIONS:
                 return country or "Canada", token
+            if token in MEXICO_REGION_ABBREVIATIONS:
+                return country or "Mexico", MEXICO_REGION_ABBREVIATIONS[token]
     return country, None
+
+
+def _country_from_address_parts(parts: list[str]) -> str | None:
+    for part in parts:
+        normalized = part.casefold()
+        if normalized in {"us", "usa", "united states", "united states of america"}:
+            return "United States"
+        if normalized in COUNTRY_TIMEZONES:
+            return part
+    if any(part.title() in US_REGION_TIMEZONES for part in parts):
+        return "United States"
+    return None
 
 
 def _string(value: object) -> str | None:
