@@ -14,6 +14,8 @@ from app.scraping.browser_crawler import (
     is_allowed_url,
     is_common_meeting_path,
     prioritize_links,
+    remembered_meeting_page_urls,
+    should_stop_after_empty_meeting_directory,
     should_stop_after_page,
 )
 from app.scraping.evidence import read_scrape_summary, write_scrape_evidence
@@ -27,6 +29,7 @@ from app.scraping.models import (
     ScrapeSourceResult,
 )
 from app.scraping.scoring import review_code_for_confidence
+from app.sources.registry import Source
 
 
 def test_meeting_page_detector_scores_meeting_links_above_noise() -> None:
@@ -581,6 +584,90 @@ def test_extract_meetings_from_rendered_landing_page_sequence_text() -> None:
     assert meetings[2].payload["name"] == "Recovery is Not and Chore"
 
 
+def test_extract_meetings_from_rendered_filter_column_text() -> None:
+    html = """
+    <div data-rendered-text-fallback="true"><pre>
+    Meetings
+    Search
+    Anywhere
+    Any Day
+    Any Time
+    Any Type
+    List
+    Map
+    Time
+    Name
+    Location / Group
+    Address / Platform
+    Region
+    4 meetings in progress
+    8:00 pm
+    Saturday
+    The Emerywood Group, As Bill Sees It
+    Emerywood Baptist Church
+    1300 Country Club Drive
+    High Point
+    9:00 am
+    Sunday
+    Conscious Contact
+    Wesley Memorial Methodist Church
+    1225 Chestnut Drive
+    High Point
+    AA ONLINE MEETINGS EVERYWHERE
+    </pre></div>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://www.aanc24.org/meetings/find-a-meeting",
+    )
+
+    assert [meeting.method for meeting in meetings] == [
+        "heuristic_rendered_column_text",
+        "heuristic_rendered_column_text",
+    ]
+    assert meetings[0].payload["name"] == "The Emerywood Group, As Bill Sees It"
+    assert meetings[0].payload["day"] == "Saturday"
+    assert meetings[0].payload["time"] == "8:00 pm"
+    assert meetings[0].payload["venue_name"] == "Emerywood Baptist Church"
+    assert meetings[0].payload["address_line1"] == "1300 Country Club Drive"
+    assert meetings[0].payload["region"] == "High Point"
+
+
+def test_extract_meetings_from_rendered_iframe_tabbed_column_text() -> None:
+    html = """
+    <div data-rendered-text-fallback="true"><pre>
+    Meetings
+    Time\tName\tLocation / Group\tAddress / Platform\tRegion
+    4 meetings in progress
+
+    8:00 pm
+    Saturday
+    \tThe Emerywood Group, As Bill Sees It\tEmerywood Baptist Church\t
+    1300 Country Club Drive
+    \tHigh Point
+
+    7:30 pm
+    Sunday
+    \tForest Hills Group\tForest Hills Presbyterian Church\t
+    836 W Lexington Avenue
+    Zoom
+    \tHigh Point
+    </pre></div>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://www.aanc24.org/meetings/find-a-meeting",
+    )
+
+    assert len(meetings) == 2
+    assert meetings[0].payload["name"] == "The Emerywood Group, As Bill Sees It"
+    assert meetings[1].payload["name"] == "Forest Hills Group"
+    assert meetings[1].payload["phone_join_info"] == "Zoom"
+    assert meetings[1].payload["region"] == "High Point"
+
+
 def test_extract_meetings_normalizes_homepage_dot_and_compact_times() -> None:
     html = """
     <main>
@@ -887,11 +974,76 @@ def test_crawler_prioritizes_ireland_meeting_schedule_tab() -> None:
     ]
 
 
+def test_crawler_prioritizes_aa_groups_links() -> None:
+    links = [
+        {"url": "https://example.org/service", "text": "Service"},
+        {"url": "https://example.org/groups", "text": "AA Groups"},
+        {"url": "https://example.org/contact", "text": "Contact"},
+    ]
+
+    prioritized = prioritize_links("https://example.org/", links)
+
+    assert [link["url"] for link in prioritized] == ["https://example.org/groups"]
+
+
+def test_crawler_prioritizes_meeting_locations_links() -> None:
+    links = [
+        {"url": "https://example.org/contact", "text": "Contact"},
+        {"url": "https://example.org/meeting-locations", "text": "Meeting Locations"},
+    ]
+
+    prioritized = prioritize_links("https://example.org/", links)
+
+    assert [link["url"] for link in prioritized] == [
+        "https://example.org/meeting-locations"
+    ]
+
+
 def test_crawler_starts_with_source_before_targeted_discovery() -> None:
     queue = initial_crawl_queue("https://www.caireland.live/")
     urls = [url for url, _depth in queue]
 
     assert urls == ["https://www.caireland.live/"]
+
+
+def test_crawler_starts_with_remembered_successful_pages() -> None:
+    queue = initial_crawl_queue(
+        "https://www.caireland.live/",
+        remembered_urls=[
+            "https://www.caireland.live/meeting-schedule",
+            "https://www.caireland.live/find-a-meeting",
+        ],
+    )
+
+    assert list(queue) == [
+        ("https://www.caireland.live/meeting-schedule", -1),
+        ("https://www.caireland.live/find-a-meeting", -1),
+        ("https://www.caireland.live/", 0),
+    ]
+
+
+def test_crawler_reads_remembered_successful_pages_from_source_config() -> None:
+    source = Source(
+        id="ca-ie",
+        fellowship="ca",
+        name="CA Ireland",
+        url="https://www.caireland.live/",
+        config={
+            "scrape": {
+                "successful_pages": [
+                    {"url": "https://www.caireland.live/meeting-schedule"},
+                    {"url": "https://www.caireland.live/meeting-schedule"},
+                    {"url": "https://www.caireland.live/groups"},
+                ],
+                "last_successful_page_url": "https://www.caireland.live/meeting-schedule",
+            }
+        },
+    )
+
+    assert remembered_meeting_page_urls(source) == [
+        "https://www.caireland.live/meeting-schedule",
+        "https://www.caireland.live/groups",
+    ]
 
 
 def test_crawler_can_fallback_to_common_meeting_paths() -> None:
@@ -900,6 +1052,10 @@ def test_crawler_can_fallback_to_common_meeting_paths() -> None:
 
     assert "https://www.caireland.live/meeting-schedule" in urls
     assert "https://www.caireland.live/meetings/" in urls
+    assert "https://www.caireland.live/groups/" in urls
+    assert "https://www.caireland.live/meeting-locations" in urls
+    assert "https://www.caireland.live/find-meeting/find-a-meeting" in urls
+    assert "https://www.caireland.live/aa-groups/" in urls
     assert "https://www.caireland.live/meetings" not in urls
 
 
@@ -1040,6 +1196,34 @@ def test_crawler_continues_when_meeting_branch_siblings_are_pending() -> None:
     assert not should_stop_after_page(page, CrawlSettings(), pending_queue=pending)
 
 
+def test_crawler_stops_after_empty_strong_meeting_directory() -> None:
+    page = ScrapedPage(
+        url="https://example.org/find-a-meeting",
+        final_url="https://example.org/find-a-meeting",
+        title="Find a Meeting",
+        html="",
+        page_score=0.9,
+        page_signals=["strong_public_meeting_directory", "meeting_form"],
+        extracted=[],
+    )
+
+    assert should_stop_after_empty_meeting_directory(page, CrawlSettings())
+
+
+def test_crawler_does_not_stop_empty_landing_page() -> None:
+    page = ScrapedPage(
+        url="https://example.org/",
+        final_url="https://example.org/",
+        title="Home",
+        html="",
+        page_score=0.9,
+        page_signals=["meeting_form"],
+        extracted=[],
+    )
+
+    assert not should_stop_after_empty_meeting_directory(page, CrawlSettings())
+
+
 def test_crawler_prunes_guessed_common_paths_after_not_found_pages() -> None:
     queue = deque(
         [
@@ -1060,3 +1244,8 @@ def test_crawler_prunes_guessed_common_paths_after_not_found_pages() -> None:
     assert _looks_like_not_found_page(page)
     assert is_common_meeting_path("https://example.org/", "https://example.org/meetings")
     assert list(pruned) == [("https://example.org/contact", 1)]
+
+
+def test_crawler_treats_group_paths_as_common_meeting_paths() -> None:
+    assert is_common_meeting_path("https://example.org/", "https://example.org/groups")
+    assert is_common_meeting_path("https://example.org/", "https://example.org/aa-groups")

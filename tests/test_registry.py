@@ -3,6 +3,7 @@ from app.sources.registry import (
     normalize_source_url,
     source_from_candidate,
     source_id_for_candidate,
+    timezone_for_country_region,
 )
 
 
@@ -68,3 +69,11 @@ def test_source_from_candidate_infers_single_timezone_country() -> None:
     )
 
     assert source.config["timezone"] == "Europe/Dublin"
+
+
+def test_timezone_for_country_region_handles_australian_state_abbreviation() -> None:
+    assert timezone_for_country_region("Australia", "WA") == "Australia/Perth"
+
+
+def test_timezone_for_country_region_handles_brazil_region_abbreviation() -> None:
+    assert timezone_for_country_region("Brazil", "SP") == "America/Sao_Paulo"

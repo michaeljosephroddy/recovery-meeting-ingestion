@@ -130,3 +130,73 @@ async def test_browser_crawler_submits_search_form_from_source_context(tmp_path:
         for page in result.scrape.pages
         for action in page.actions
     )
+
+
+async def test_browser_crawler_submits_group_search_form_from_source_metadata(
+    tmp_path: Path,
+) -> None:
+    site_dir = tmp_path / "group-search-site"
+    site_dir.mkdir()
+    (site_dir / "index.html").write_text(
+        """
+        <form id="group-search" action="/groups.html">
+          <input type="search" name="q">
+          <button type="submit">Find</button>
+        </form>
+        """,
+        encoding="utf-8",
+    )
+    (site_dir / "groups.html").write_text(
+        """
+        <article class="meeting-card">
+          <h3>Belize City Group</h3>
+          <p>Wednesday 6:00 pm</p>
+          <p class="address">114 Cemetery Road</p>
+        </article>
+        """,
+        encoding="utf-8",
+    )
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        partial(SimpleHTTPRequestHandler, directory=str(site_dir)),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        source = Source(
+            id="aa-group-search-site",
+            fellowship="aa",
+            name="Group Search Site",
+            url=f"http://127.0.0.1:{server.server_port}/",
+            country="Belize",
+            source_type=SourceType.LOCAL_SERVICE_BODY,
+            adapter_type=AdapterType.PLAYWRIGHT_BROWSER,
+            config={
+                "timezone": "America/Belize",
+                "metadata": {"address_text": "114 Cemetery Road Belize City Belize"},
+            },
+            requires_browser=True,
+        )
+        result = await scrape_source(
+            source,
+            Settings(),
+            crawl_settings=CrawlSettings(
+                max_pages_per_source=1,
+                max_depth=0,
+                save_artifacts=True,
+            ),
+            artifact_dir=tmp_path / "artifacts",
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+    assert result.scrape.status == "succeeded"
+    assert result.ingest.candidates[0].name == "Belize City Group"
+    assert any(
+        action.action == "heuristic_search_form"
+        and action.status == "succeeded"
+        and action.value == "Belize City"
+        for page in result.scrape.pages
+        for action in page.actions
+    )

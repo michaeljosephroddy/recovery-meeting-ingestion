@@ -6,7 +6,13 @@ import pytest
 from app.config import Settings
 from app.normalize.canonical import CanonicalMeetingCandidate, MeetingOccurrence
 from app.review.flags import ReviewFlag
-from app.sources.registry import SourceCandidate, source_from_candidate
+from app.sources.registry import (
+    AdapterType,
+    Source,
+    SourceCandidate,
+    SourceType,
+    source_from_candidate,
+)
 from app.storage.db import connect
 from app.storage.repositories import (
     CanonicalMeetingRepository,
@@ -41,6 +47,43 @@ def test_source_repository_upsert_and_lookup_requires_local_db() -> None:
     assert loaded is not None
     assert loaded.id == stored.id
     assert loaded.normalized_url == "https://integration.example.org/meetings"
+
+
+def test_discovery_upsert_preserves_configured_adapter_requires_local_db() -> None:
+    if os.environ.get("RUN_DB_TESTS") != "1":
+        pytest.skip("set RUN_DB_TESTS=1 to run local Postgres integration tests")
+
+    settings = Settings()
+    configured = Source(
+        id="integration-configured-aa",
+        fellowship="aa",
+        name="Configured AA Source",
+        url="https://integration.example.org/configured-aa",
+        normalized_url="https://integration.example.org/configured-aa",
+        country="US",
+        source_type=SourceType.LOCAL_SERVICE_BODY,
+        adapter_type=AdapterType.PLAYWRIGHT_BROWSER,
+        requires_browser=True,
+        config={"scrape": {"artifact_import": True}},
+    )
+    discovered = source_from_candidate(
+        SourceCandidate(
+            fellowship="aa",
+            label="Configured AA Source Rediscovered",
+            url="https://integration.example.org/configured-aa",
+            country="US",
+        )
+    )
+
+    with connect(settings) as connection:
+        repository = SourceRepository(connection)
+        repository.upsert_source(configured)
+        stored = repository.upsert_source(discovered)
+        connection.rollback()
+
+    assert stored.adapter_type == AdapterType.PLAYWRIGHT_BROWSER
+    assert stored.requires_browser is True
+    assert stored.config["scrape"]["artifact_import"] is True
 
 
 def test_import_run_repository_requires_local_db() -> None:

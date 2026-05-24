@@ -97,10 +97,41 @@ CANADA_REGION_TIMEZONES = {
     "Saskatchewan": "America/Regina",
 }
 
+AUSTRALIA_REGION_TIMEZONES = {
+    "Act": "Australia/Sydney",
+    "Australian Capital Territory": "Australia/Sydney",
+    "New South Wales": "Australia/Sydney",
+    "Nsw": "Australia/Sydney",
+    "Northern Territory": "Australia/Darwin",
+    "Nt": "Australia/Darwin",
+    "Queensland": "Australia/Brisbane",
+    "Qld": "Australia/Brisbane",
+    "South Australia": "Australia/Adelaide",
+    "Sa": "Australia/Adelaide",
+    "Tas": "Australia/Hobart",
+    "Tasmania": "Australia/Hobart",
+    "Victoria": "Australia/Melbourne",
+    "Vic": "Australia/Melbourne",
+    "Wa": "Australia/Perth",
+    "Western Australia": "Australia/Perth",
+}
+
+BRAZIL_REGION_TIMEZONES = {
+    "Sao Paulo": "America/Sao_Paulo",
+    "São Paulo": "America/Sao_Paulo",
+    "Sp": "America/Sao_Paulo",
+}
+
 COUNTRY_TIMEZONES = {
     "barbados": "America/Barbados",
+    "belgium": "Europe/Brussels",
+    "belize": "America/Belize",
+    "bulgaria": "Europe/Sofia",
+    "costa rica": "America/Costa_Rica",
+    "czechia": "Europe/Prague",
     "dominican republic": "America/Santo_Domingo",
     "denmark": "Europe/Copenhagen",
+    "fiji": "Pacific/Fiji",
     "france": "Europe/Paris",
     "germany": "Europe/Berlin",
     "greece": "Europe/Athens",
@@ -226,13 +257,21 @@ def timezone_for_candidate(
     *,
     inferred_region: str | None = None,
 ) -> str | None:
-    region = (inferred_region or candidate.region or "").strip().title()
-    country = (candidate.country or "").strip().lower()
-    if country in {"united states", "us", "usa"} and region:
-        return US_REGION_TIMEZONES.get(region)
-    if country == "canada" and region:
-        return CANADA_REGION_TIMEZONES.get(region)
-    if timezone := COUNTRY_TIMEZONES.get(country):
+    return timezone_for_country_region(candidate.country, inferred_region or candidate.region)
+
+
+def timezone_for_country_region(country: str | None, region: str | None = None) -> str | None:
+    region_title = (region or "").strip().title()
+    country_lower = (country or "").strip().lower()
+    if country_lower in {"united states", "us", "usa"} and region_title:
+        return US_REGION_TIMEZONES.get(region_title)
+    if country_lower == "canada" and region_title:
+        return CANADA_REGION_TIMEZONES.get(region_title)
+    if country_lower == "australia" and region_title:
+        return AUSTRALIA_REGION_TIMEZONES.get(region_title)
+    if country_lower == "brazil" and region_title:
+        return BRAZIL_REGION_TIMEZONES.get(region_title)
+    if timezone := COUNTRY_TIMEZONES.get(country_lower):
         return timezone
     return None
 

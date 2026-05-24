@@ -50,6 +50,65 @@ def test_artifact_import_infers_timezone_from_source_metadata_country(tmp_path) 
     assert [flag.code for flag in result.ingest.review_flags] == []
 
 
+def test_artifact_import_keeps_successful_page_memory(tmp_path) -> None:
+    source_dir = tmp_path / "na-area"
+    source_dir.mkdir()
+    summary_path = source_dir / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "source_id": "na-area",
+                "source_url": "https://naarea.example/",
+                "status": "succeeded",
+                "pages_visited": 2,
+                "records_extracted": 4,
+                "pages": [
+                    {
+                        "url": "https://naarea.example/",
+                        "final_url": "https://naarea.example/",
+                        "page_score": 0.2,
+                        "page_signals": [],
+                        "extracted_count": 0,
+                        "extracted": [],
+                    },
+                    {
+                        "url": "https://naarea.example/meetings",
+                        "final_url": "https://naarea.example/meetings",
+                        "page_score": 0.9,
+                        "page_signals": ["meeting_table"],
+                        "extracted_count": 4,
+                        "extracted": [
+                            {
+                                "payload": {
+                                    "name": "Noon Main",
+                                    "day": "Tuesday",
+                                    "time": "12:00 pm",
+                                    "city": "Dublin",
+                                },
+                                "method": "heuristic_table_row",
+                                "confidence": 0.95,
+                                "signals": ["day", "time", "name"],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = import_artifact_summary(summary_path, Settings())
+
+    assert result.successful_pages == [
+        {
+            "url": "https://naarea.example/meetings",
+            "records_extracted": 4,
+            "score": 0.9,
+            "signals": ["meeting_table"],
+        }
+    ]
+
+
 def test_artifact_import_uses_stored_source_config_timezone(tmp_path) -> None:
     source_dir = tmp_path / "ca-arizona"
     source_dir.mkdir()

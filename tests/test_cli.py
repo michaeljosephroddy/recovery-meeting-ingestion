@@ -2,7 +2,15 @@ import json
 
 from typer.testing import CliRunner
 
-from app.cli import _ca_world_listings_shadowed_by_local_sources, app
+from app.cli import (
+    _ca_world_listings_shadowed_by_local_sources,
+    _select_scrape_batch,
+    _source_last_scrape_failed,
+    _source_with_scrape_metadata,
+    _source_with_scrape_status,
+    app,
+)
+from app.scraping.models import ExtractedMeeting, ScrapedPage, ScrapeSourceResult
 from app.sources.registry import Source, SourceType
 
 from .conftest import FIXTURES
@@ -125,6 +133,155 @@ def test_ca_world_listing_is_shadowed_when_local_source_exists() -> None:
     ]
 
     assert _ca_world_listings_shadowed_by_local_sources(sources) == {"ca-world-thailand"}
+
+
+def test_select_scrape_batch_applies_offset_before_limit() -> None:
+    sources = [
+        Source(
+            id=f"aa-{index}",
+            fellowship="aa",
+            name=f"Source {index}",
+            url=f"https://example.org/{index}",
+        )
+        for index in range(5)
+    ]
+
+    selected = _select_scrape_batch(sources, offset=2, limit=2)
+
+    assert [source.id for source in selected] == ["aa-2", "aa-3"]
+
+
+def test_source_with_scrape_metadata_marks_failed_source_for_retry_skip() -> None:
+    source = Source(
+        id="aa-failed",
+        fellowship="aa",
+        name="Failed AA",
+        url="https://example.org",
+        config={"scrape": {"previous_adapter_type": "unknown"}},
+    )
+    scrape = ScrapeSourceResult(
+        source_id=source.id,
+        source_url=source.url,
+        status="failed",
+        error_message="net::ERR_NAME_NOT_RESOLVED at https://example.org",
+    )
+
+    updated = _source_with_scrape_metadata(source, scrape)
+
+    assert _source_last_scrape_failed(updated)
+    assert updated.config["scrape"]["previous_adapter_type"] == "unknown"
+    assert updated.config["scrape"]["last_status"] == "failed"
+    assert updated.config["scrape"]["last_pages_visited"] == 0
+    assert updated.config["scrape"]["last_records_extracted"] == 0
+    assert "ERR_NAME_NOT_RESOLVED" in updated.config["scrape"]["last_error"]
+
+
+def test_source_with_scrape_metadata_clears_previous_error_after_success() -> None:
+    source = Source(
+        id="aa-succeeded",
+        fellowship="aa",
+        name="Succeeded AA",
+        url="https://example.org",
+        config={"scrape": {"last_status": "failed", "last_error": "timeout"}},
+    )
+    scrape = ScrapeSourceResult(
+        source_id=source.id,
+        source_url=source.url,
+        status="succeeded",
+        artifact_dir="scrape_artifacts/aa-succeeded",
+    )
+
+    updated = _source_with_scrape_metadata(source, scrape)
+
+    assert not _source_last_scrape_failed(updated)
+    assert updated.config["scrape"]["last_status"] == "succeeded"
+    assert updated.config["scrape"]["last_artifact_dir"] == "scrape_artifacts/aa-succeeded"
+    assert "last_error" not in updated.config["scrape"]
+
+
+def test_source_with_scrape_metadata_remembers_successful_pages_by_record_count() -> None:
+    source = Source(
+        id="na-browser",
+        fellowship="na",
+        name="NA Browser",
+        url="https://example.org",
+    )
+    scrape = ScrapeSourceResult(
+        source_id=source.id,
+        source_url=source.url,
+        status="succeeded",
+        pages=[
+            ScrapedPage(
+                url="https://example.org/",
+                final_url="https://example.org/",
+                title="Home",
+                html="",
+                extracted=[
+                    ExtractedMeeting(
+                        payload={"name": "Home Meeting"},
+                        method="test",
+                        confidence=0.9,
+                        source_page_url="https://example.org/",
+                    )
+                ],
+            ),
+            ScrapedPage(
+                url="https://example.org/find-a-meeting",
+                final_url="https://example.org/find-a-meeting",
+                title="Find a Meeting",
+                html="",
+                page_score=0.9,
+                page_signals=["strong_public_meeting_directory"],
+                extracted=[
+                    ExtractedMeeting(
+                        payload={"name": f"Meeting {index}"},
+                        method="test",
+                        confidence=0.9,
+                        source_page_url="https://example.org/find-a-meeting",
+                    )
+                    for index in range(4)
+                ],
+            ),
+        ],
+    )
+
+    updated = _source_with_scrape_metadata(source, scrape)
+
+    scrape_config = updated.config["scrape"]
+    assert scrape_config["last_successful_page_url"] == "https://example.org/find-a-meeting"
+    assert scrape_config["last_successful_page_records"] == 4
+    assert scrape_config["last_successful_page_signals"] == [
+        "strong_public_meeting_directory"
+    ]
+    assert scrape_config["successful_pages"][0]["url"] == (
+        "https://example.org/find-a-meeting"
+    )
+
+
+def test_source_with_scrape_status_uses_artifact_summary_counts() -> None:
+    source = Source(
+        id="aa-artifact",
+        fellowship="aa",
+        name="Artifact AA",
+        url="https://example.org",
+        config={"scrape": {"artifact_import": True}},
+    )
+
+    updated = _source_with_scrape_status(
+        source,
+        status="failed",
+        pages_visited=3,
+        records_extracted=0,
+        artifact_dir="scrape_artifacts/aa-full/aa-artifact",
+        error_message="certificate expired",
+    )
+
+    assert _source_last_scrape_failed(updated)
+    assert updated.config["scrape"]["artifact_import"] is True
+    assert updated.config["scrape"]["last_pages_visited"] == 3
+    assert updated.config["scrape"]["last_records_extracted"] == 0
+    assert updated.config["scrape"]["last_artifact_dir"].endswith("/aa-artifact")
+    assert updated.config["scrape"]["last_error"] == "certificate expired"
 
 
 def test_import_artifacts_dry_run_uses_summary_payload(tmp_path) -> None:

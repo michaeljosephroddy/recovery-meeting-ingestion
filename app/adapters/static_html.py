@@ -8,7 +8,7 @@ from app.adapters.base import AdapterPayloadError, RawMeeting
 from app.adapters.html_config import configured_selectors, extract_records_from_html
 from app.normalize.canonical import CanonicalMeetingCandidate, MeetingOccurrence
 from app.normalize.schedule import normalize_days, parse_time
-from app.sources.registry import Source
+from app.sources.registry import Source, timezone_for_country_region
 
 
 class StaticHtmlAdapter:
@@ -55,7 +55,14 @@ class StaticHtmlAdapter:
         payload = raw.payload
         days = normalize_days(_string(payload.get("day")))
         start = parse_time(_string(payload.get("time")))
-        timezone = _string(payload.get("timezone")) or self.source.config.get("timezone") or "UTC"
+        country = _string(payload.get("country")) or self.source.country
+        region = _string(payload.get("region")) or self.source.region
+        timezone = (
+            _string(payload.get("timezone"))
+            or self.source.config.get("timezone")
+            or timezone_for_country_region(country, region)
+            or "UTC"
+        )
         occurrences: list[MeetingOccurrence] = []
         if days and start is not None:
             occurrences.extend(
@@ -93,8 +100,8 @@ class StaticHtmlAdapter:
             venue_name=_string(payload.get("venue_name")),
             address_line1=_string(payload.get("address_line1") or payload.get("address")),
             city=_string(payload.get("city")) or self.source.config.get("city"),
-            region=_string(payload.get("region")) or self.source.region,
-            country=_string(payload.get("country")) or self.source.country,
+            region=region,
+            country=country,
             online_url=online_url,  # type: ignore[arg-type]
             phone_join_info=phone,
             formats=_formats(payload.get("formats")),

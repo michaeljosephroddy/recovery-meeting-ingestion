@@ -320,7 +320,7 @@ def scrape_source(
     if dry_run:
         console.print("output: not written because --dry-run was set")
         return
-    persisted = _persist_ingest_result(settings, source, result.ingest)
+    persisted = _persist_ingest_result(settings, source, result.ingest, scrape=result.scrape)
     _print_persisted_result(persisted)
 
 
@@ -332,6 +332,10 @@ def scrape_all(
         typer.Option(help="Only scrape sources for this fellowship."),
     ] = None,
     limit: Annotated[int | None, typer.Option(help="Maximum sources to scrape.")] = None,
+    offset: Annotated[
+        int,
+        typer.Option(help="Number of scrapeable sources to skip before applying --limit."),
+    ] = 0,
     max_pages_per_source: Annotated[
         int,
         typer.Option(help="Maximum pages to visit per source."),
@@ -370,8 +374,7 @@ def scrape_all(
         for source in sources
         if _is_scrapeable_source(source) and source.id not in shadowed_world_listing_ids
     ]
-    if limit is not None:
-        scrapeable = scrapeable[:limit]
+    scrapeable = _select_scrape_batch(scrapeable, offset=offset, limit=limit)
 
     console.print(f"Scrape all dry_run={dry_run}")
     console.print(f"sources: {len(scrapeable)}")
@@ -398,7 +401,12 @@ def scrape_all(
             )
             _print_scrape_result(f"- {source.id}", dry_run, source, result)
             if not dry_run:
-                persisted = _persist_ingest_result(settings, source, result.ingest)
+                persisted = _persist_ingest_result(
+                    settings,
+                    source,
+                    result.ingest,
+                    scrape=result.scrape,
+                )
                 console.print(
                     f"  stored={persisted['raw_records_stored']} "
                     f"canonical={persisted['canonical_meetings_upserted']} "
@@ -510,7 +518,17 @@ def import_artifacts(
             console.print(f"  error={result.error_message}")
         if dry_run:
             continue
-        persisted = _persist_ingest_result(settings, result.source, result.ingest)
+        persisted = _persist_ingest_result(
+            settings,
+            result.source,
+            result.ingest,
+            scrape_status=result.scrape_status,
+            scrape_pages_visited=result.pages_visited,
+            scrape_records_extracted=result.records_extracted,
+            scrape_artifact_dir=str(summary_path.parent),
+            scrape_error_message=result.error_message,
+            scrape_successful_pages=result.successful_pages,
+        )
         totals["raw_records_stored"] += _int_result(persisted["raw_records_stored"])
         totals["canonical_meetings_upserted"] += _int_result(
             persisted["canonical_meetings_upserted"]
@@ -901,6 +919,19 @@ def _is_scrapeable_source(source: Source) -> bool:
     )
 
 
+def _select_scrape_batch(
+    sources: list[Source],
+    *,
+    offset: int = 0,
+    limit: int | None = None,
+) -> list[Source]:
+    start = max(0, offset)
+    selected = sources[start:]
+    if limit is not None:
+        return selected[:limit]
+    return selected
+
+
 def _ca_world_listings_shadowed_by_local_sources(sources: list[Source]) -> set[str]:
     local_world_sources = {
         normalize_source_url(world_source)
@@ -935,6 +966,100 @@ def _source_last_scrape_failed(source: Source) -> bool:
     return scrape_config.get("last_status") == "failed"
 
 
+def _source_with_scrape_metadata(source: Source, scrape: ScrapeSourceResult) -> Source:
+    return _source_with_scrape_status(
+        source,
+        status=scrape.status,
+        pages_visited=scrape.pages_visited,
+        records_extracted=scrape.records_extracted,
+        artifact_dir=scrape.artifact_dir,
+        error_message=scrape.error_message,
+        successful_pages=_successful_pages_from_scrape(scrape),
+    )
+
+
+def _source_with_scrape_status(
+    source: Source,
+    *,
+    status: str,
+    pages_visited: int,
+    records_extracted: int,
+    artifact_dir: str | None = None,
+    error_message: str | None = None,
+    successful_pages: list[dict[str, object]] | None = None,
+) -> Source:
+    existing = source.config.get("scrape")
+    scrape_config = dict(existing) if isinstance(existing, dict) else {}
+    scrape_config.update(
+        {
+            "last_status": status,
+            "last_pages_visited": pages_visited,
+            "last_records_extracted": records_extracted,
+        }
+    )
+    if artifact_dir:
+        scrape_config["last_artifact_dir"] = artifact_dir
+    else:
+        scrape_config.pop("last_artifact_dir", None)
+    if error_message:
+        scrape_config["last_error"] = error_message[:500]
+    else:
+        scrape_config.pop("last_error", None)
+    if successful_pages:
+        scrape_config["successful_pages"] = successful_pages[:5]
+        first_page = successful_pages[0]
+        url = first_page.get("url")
+        if isinstance(url, str):
+            scrape_config["last_successful_page_url"] = url
+        records = first_page.get("records_extracted")
+        if isinstance(records, int):
+            scrape_config["last_successful_page_records"] = records
+        signals = first_page.get("signals")
+        if isinstance(signals, list):
+            scrape_config["last_successful_page_signals"] = signals
+    elif status == "succeeded" and records_extracted == 0:
+        scrape_config.pop("successful_pages", None)
+        scrape_config.pop("last_successful_page_url", None)
+        scrape_config.pop("last_successful_page_records", None)
+        scrape_config.pop("last_successful_page_signals", None)
+    return source.model_copy(update={"config": {**source.config, "scrape": scrape_config}})
+
+
+def _successful_pages_from_scrape(scrape: ScrapeSourceResult) -> list[dict[str, object]]:
+    pages = [
+        {
+            "url": page.final_url or page.url,
+            "records_extracted": page.extracted_count,
+            "score": page.page_score,
+            "signals": page.page_signals,
+        }
+        for page in scrape.pages
+        if page.extracted_count > 0 and (page.final_url or page.url)
+    ]
+    return _dedupe_successful_pages(pages)
+
+
+def _dedupe_successful_pages(pages: list[dict[str, object]]) -> list[dict[str, object]]:
+    deduped: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for page in sorted(
+        pages,
+        key=lambda item: (
+            item.get("records_extracted") if isinstance(item.get("records_extracted"), int) else 0,
+            item.get("score") if isinstance(item.get("score"), float | int) else 0,
+        ),
+        reverse=True,
+    ):
+        url = page.get("url")
+        if not isinstance(url, str) or not url.strip():
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        deduped.append(page)
+    return deduped[:5]
+
+
 def _print_scrape_result(
     label: str,
     dry_run: bool,
@@ -960,7 +1085,27 @@ def _persist_ingest_result(
     settings: Settings,
     source: Source,
     result: IngestResult,
+    *,
+    scrape: ScrapeSourceResult | None = None,
+    scrape_status: str | None = None,
+    scrape_pages_visited: int = 0,
+    scrape_records_extracted: int = 0,
+    scrape_artifact_dir: str | None = None,
+    scrape_error_message: str | None = None,
+    scrape_successful_pages: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
+    if scrape is not None:
+        source = _source_with_scrape_metadata(source, scrape)
+    elif scrape_status is not None:
+        source = _source_with_scrape_status(
+            source,
+            status=scrape_status,
+            pages_visited=scrape_pages_visited,
+            records_extracted=scrape_records_extracted,
+            artifact_dir=scrape_artifact_dir,
+            error_message=scrape_error_message,
+            successful_pages=scrape_successful_pages,
+        )
     with connect(settings) as connection:
         source_repository = SourceRepository(connection)
         stored_source = source_repository.upsert_source(source)

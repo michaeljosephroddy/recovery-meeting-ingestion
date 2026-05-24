@@ -1,5 +1,6 @@
 import httpx
 
+from app.adapters.base import RawMeeting
 from app.adapters.static_html import StaticHtmlAdapter
 from app.config import Settings
 from app.ingest import ingest_source
@@ -46,6 +47,27 @@ def test_static_html_adapter_parses_configured_selectors() -> None:
     assert candidate.occurrences[0].start_time_local.hour == 19
     assert candidate.occurrences[0].timezone == "Europe/Dublin"
     assert candidate.formats == ["Open", "Discussion"]
+
+
+def test_static_html_adapter_infers_timezone_from_payload_region() -> None:
+    source = static_source().model_copy(update={"country": "Australia", "config": {}})
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="australia-wa",
+        source_url=source.url,
+        payload={
+            "name": "Perth Monday",
+            "day": "Monday",
+            "time": "7:00 pm",
+            "address_line1": "1 Example Street",
+            "region": "WA",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.occurrences[0].timezone == "Australia/Perth"
 
 
 async def test_static_html_adapter_fetch_uses_transport() -> None:

@@ -97,6 +97,8 @@ def extract_meetings_from_html(
     extracted.extend(_extract_cards(soup, source_page_url, page_score))
     extracted.extend(_extract_day_sections(soup, source_page_url, page_score))
     if not extracted:
+        extracted.extend(_extract_rendered_column_text_meetings(soup, source_page_url, page_score))
+    if not extracted:
         extracted.extend(_extract_direct_listing_blocks(soup, source_page_url, page_score))
     if not extracted:
         extracted.extend(_extract_inline_schedule_lines(soup, source_page_url, page_score))
@@ -685,8 +687,7 @@ def _extract_structured_text_meetings(
     source_page_url: str,
     page_score: float,
 ) -> list[ExtractedMeeting]:
-    lines = [_clean_fragment(line) for line in soup.get_text("\n", strip=True).splitlines()]
-    lines = [line for line in lines if line and line != "\u200b"]
+    lines = _rendered_text_lines(soup)
     if "Number found:" not in lines:
         return []
     meetings: list[ExtractedMeeting] = []
@@ -729,8 +730,7 @@ def _extract_sequenced_text_meetings(
 ) -> list[ExtractedMeeting]:
     if soup.select_one("[data-rendered-text-fallback]") is None:
         return []
-    lines = [_clean_fragment(line) for line in soup.get_text("\n", strip=True).splitlines()]
-    lines = [line for line in lines if line and line != "\u200b"]
+    lines = _rendered_text_lines(soup)
     meetings: list[ExtractedMeeting] = []
     row_index = 0
     for index, line in enumerate(lines):
@@ -769,6 +769,110 @@ def _extract_sequenced_text_meetings(
         )
         row_index += 1
     return meetings
+
+
+def _extract_rendered_column_text_meetings(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    if soup.select_one("[data-rendered-text-fallback]") is None:
+        return []
+    lines = _rendered_text_lines(soup)
+    start_index = _rendered_column_text_start_index(lines)
+    if start_index is None:
+        return []
+    meetings: list[ExtractedMeeting] = []
+    index = start_index
+    row_index = 0
+    while index < len(lines) - 4:
+        if _is_rendered_column_footer(lines[index]):
+            break
+        time = _first_time_match(lines[index])
+        day = _day_from_schedule_line(lines[index + 1])
+        if not time or not day:
+            index += 1
+            continue
+        payload: dict[str, Any] = {
+            "time": _normalize_extracted_time(time),
+            "day": day,
+            "name": _clean_meeting_name_line(lines[index + 2]),
+            "venue_name": _clean_fragment(lines[index + 3]),
+        }
+        address = _clean_fragment(lines[index + 4])
+        if address.lower() in {"zoom", "online", "phone"}:
+            payload["phone_join_info"] = address
+        else:
+            payload["address_line1"] = address
+        region_index = index + 5
+        if (
+            region_index < len(lines)
+            and lines[region_index].lower() in {"zoom", "online", "phone"}
+        ):
+            payload["phone_join_info"] = " ".join(
+                part for part in (payload.get("phone_join_info"), lines[region_index]) if part
+            )
+            region_index += 1
+        if region_index < len(lines) and not _first_time_match(lines[region_index]):
+            region = _clean_fragment(lines[region_index])
+            if region and not _is_rendered_column_footer(region):
+                payload["region"] = region
+        payload = _without_empty(payload)
+        if _looks_like_meeting_payload(payload):
+            confidence, signals = confidence_for_payload(
+                payload,
+                method="heuristic_rendered_column_text",
+                page_score=page_score,
+                repeated_structure=True,
+                table_headers=True,
+            )
+            meetings.append(
+                ExtractedMeeting(
+                    payload={**payload, "row_index": row_index},
+                    method="heuristic_rendered_column_text",
+                    confidence=max(confidence, 0.78),
+                    source_page_url=source_page_url,
+                    signals=signals,
+                    selector_hint="rendered_column_text",
+                )
+            )
+            row_index += 1
+            index += 6
+            continue
+        index += 1
+    return meetings
+
+
+def _rendered_text_lines(soup: BeautifulSoup) -> list[str]:
+    lines: list[str] = []
+    for raw_line in soup.get_text("\n", strip=True).splitlines():
+        for part in raw_line.split("\t"):
+            cleaned = _clean_fragment(part)
+            if cleaned and cleaned != "\u200b":
+                lines.append(cleaned)
+    return lines
+
+
+def _rendered_column_text_start_index(lines: list[str]) -> int | None:
+    for index in range(len(lines) - 4):
+        headers = [line.lower() for line in lines[index : index + 5]]
+        if (
+            headers[0] == "time"
+            and headers[1] == "name"
+            and "location" in headers[2]
+            and "address" in headers[3]
+            and headers[4] == "region"
+        ):
+            start = index + 5
+            if start < len(lines) and "meetings in progress" in lines[start].lower():
+                start += 1
+            return start
+    return None
+
+
+def _is_rendered_column_footer(line: str) -> bool:
+    lowered = line.lower()
+    return lowered.startswith("aa online") or lowered.startswith("meeting changes")
 
 
 def _extract_direct_listing_blocks(

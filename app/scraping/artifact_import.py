@@ -23,6 +23,7 @@ class ArtifactSourceImport:
     scrape_status: str
     pages_visited: int
     records_extracted: int
+    successful_pages: list[dict[str, object]]
     ingest: IngestResult
     error_message: str | None = None
 
@@ -59,9 +60,38 @@ def import_artifact_summary(
         scrape_status=str(summary.get("status") or "unknown"),
         pages_visited=_int(summary.get("pages_visited")),
         records_extracted=_int(summary.get("records_extracted")),
+        successful_pages=_successful_pages_from_summary(summary),
         ingest=ingest,
         error_message=_optional_string(summary.get("error_message")),
     )
+
+
+def _successful_pages_from_summary(summary: dict[str, Any]) -> list[dict[str, object]]:
+    pages = summary.get("pages")
+    if not isinstance(pages, list):
+        return []
+    successful_pages: list[dict[str, object]] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        records = _int(page.get("extracted_count"))
+        if records <= 0:
+            continue
+        url = _optional_string(page.get("final_url")) or _optional_string(page.get("url"))
+        if not url:
+            continue
+        score_value = page.get("page_score")
+        score = score_value if isinstance(score_value, int | float) else 0
+        signals = page.get("page_signals")
+        successful_pages.append(
+            {
+                "url": url,
+                "records_extracted": records,
+                "score": score,
+                "signals": signals if isinstance(signals, list) else [],
+            }
+        )
+    return successful_pages
 
 
 def source_metadata_by_id(artifact_dir: Path) -> dict[str, dict[str, Any]]:

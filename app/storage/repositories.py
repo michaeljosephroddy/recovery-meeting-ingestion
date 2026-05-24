@@ -49,9 +49,18 @@ class SourceRepository:
                     country = COALESCE(EXCLUDED.country, sources.country),
                     region = COALESCE(EXCLUDED.region, sources.region),
                     source_type = EXCLUDED.source_type,
-                    adapter_type = EXCLUDED.adapter_type,
-                    permission_status = EXCLUDED.permission_status,
-                    requires_browser = EXCLUDED.requires_browser,
+                    adapter_type = CASE
+                        WHEN sources.adapter_type <> 'unknown' AND EXCLUDED.adapter_type = 'unknown'
+                            THEN sources.adapter_type
+                        ELSE EXCLUDED.adapter_type
+                    END,
+                    permission_status = CASE
+                        WHEN sources.permission_status <> 'unknown'
+                            AND EXCLUDED.permission_status = 'unknown'
+                            THEN sources.permission_status
+                        ELSE EXCLUDED.permission_status
+                    END,
+                    requires_browser = sources.requires_browser OR EXCLUDED.requires_browser,
                     config = sources.config || EXCLUDED.config,
                     updated_at = NOW()
                 RETURNING

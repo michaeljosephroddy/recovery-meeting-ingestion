@@ -35,11 +35,16 @@ DAY_NAMES = {
     "sábado": 6,
     "sabado": 6,
     "lunes": 1,
+    "lune": 1,
     "martes": 2,
+    "marte": 2,
     "miércoles": 3,
     "miercoles": 3,
+    "miercole": 3,
     "jueves": 4,
+    "jueve": 4,
     "viernes": 5,
+    "vierne": 5,
     "dimanche": 0,
     "lundi": 1,
     "mardi": 2,
@@ -164,7 +169,10 @@ def normalize_days(value: int | str | None) -> list[int]:
             return list(range(7))
         if cleaned in DAY_NAMES:
             return [DAY_NAMES[cleaned]]
-    day = int(value)
+    try:
+        day = int(value)
+    except (TypeError, ValueError):
+        return []
     if 0 <= day <= 6:
         return [day]
     if 1 <= day <= 7:

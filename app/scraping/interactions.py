@@ -8,8 +8,15 @@ from app.sources.registry import Source
 MEETING_BUTTON_TEXT = (
     "meetings",
     "meeting list",
+    "meeting locations",
+    "groups",
+    "aa groups",
+    "a.a. groups",
     "find a meeting",
+    "find meeting",
+    "find meetings",
     "search",
+    "filter",
     "list",
     "list view",
     "load more",
@@ -160,47 +167,139 @@ async def _try_click(
 
 
 async def _try_submit_search_form(page: Any, source: Source) -> BrowserActionTrace | None:
-    seed = str(source.config.get("city") or source.region or "").strip()
-    if not seed:
-        return BrowserActionTrace(
-            action="heuristic_search_form",
-            status="skipped",
-            message="needs_search_seed",
-        )
+    seed = _search_seed_for_source(source)
     selectors = (
         "form input[name*='city' i]",
         "form input[name*='location' i]",
         "form input[name*='postcode' i]",
         "form input[name*='zip' i]",
+        "form input[name*='search' i]",
+        "form input[name*='query' i]",
+        "form input[name='s' i]",
+        "form input[name*='keyword' i]",
+        "form input[placeholder*='city' i]",
+        "form input[placeholder*='location' i]",
+        "form input[placeholder*='postcode' i]",
+        "form input[placeholder*='zip' i]",
+        "form input[placeholder*='search' i]",
         "form[aria-label*='meeting' i] input[type='search']",
         "form[id*='meeting' i] input[type='search']",
         "form[class*='meeting' i] input[type='search']",
+        "form[id*='group' i] input[type='search']",
+        "form[class*='group' i] input[type='search']",
     )
-    for selector in selectors:
+    if seed:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if callable(locator):
+                    locator = locator()
+                if await locator.count() == 0:
+                    continue
+                await locator.fill(seed, timeout=1_500)
+                await locator.press("Enter", timeout=1_500)
+                with suppress(Exception):
+                    await page.wait_for_load_state("networkidle", timeout=1_500)
+                return BrowserActionTrace(
+                    action="heuristic_search_form",
+                    selector=selector,
+                    value=seed,
+                )
+            except Exception as exc:
+                return BrowserActionTrace(
+                    action="heuristic_search_form",
+                    selector=selector,
+                    value=seed,
+                    status="failed",
+                    message=str(exc),
+                )
+    submit_trace = await _try_submit_meeting_form(page)
+    if submit_trace is not None:
+        return submit_trace
+    return None
+
+
+async def _try_submit_meeting_form(page: Any) -> BrowserActionTrace | None:
+    form_selectors = (
+        "form[aria-label*='meeting' i]",
+        "form[id*='meeting' i]",
+        "form[class*='meeting' i]",
+        "form[id*='group' i]",
+        "form[class*='group' i]",
+        "form:has(input[name*='meeting' i])",
+        "form:has(input[name*='group' i])",
+        "form:has(input[name*='location' i])",
+        "form:has(input[name*='city' i])",
+        "form:has(select[name*='day' i])",
+        "form:has(select[name*='type' i])",
+    )
+    button_selectors = (
+        "button[type='submit']",
+        "input[type='submit']",
+        "button:has-text('Search')",
+        "button:has-text('Find')",
+        "button:has-text('Filter')",
+        "button:has-text('Show')",
+    )
+    for form_selector in form_selectors:
         try:
-            locator = page.locator(selector).first
-            if callable(locator):
-                locator = locator()
-            if await locator.count() == 0:
+            form = page.locator(form_selector).first
+            if callable(form):
+                form = form()
+            if await form.count() == 0:
                 continue
-            await locator.fill(seed, timeout=1_500)
-            await locator.press("Enter", timeout=1_500)
-            with suppress(Exception):
-                await page.wait_for_load_state("networkidle", timeout=1_500)
-            return BrowserActionTrace(
-                action="heuristic_search_form",
-                selector=selector,
-                value=seed,
-            )
+            for button_selector in button_selectors:
+                button = form.locator(button_selector).first
+                if callable(button):
+                    button = button()
+                if await button.count() == 0:
+                    continue
+                await button.click(timeout=1_500)
+                with suppress(Exception):
+                    await page.wait_for_load_state("networkidle", timeout=1_500)
+                return BrowserActionTrace(
+                    action="heuristic_search_form",
+                    selector=f"{form_selector} {button_selector}",
+                    message="submitted meeting form without seed",
+                )
         except Exception as exc:
             return BrowserActionTrace(
                 action="heuristic_search_form",
-                selector=selector,
-                value=seed,
+                selector=form_selector,
                 status="failed",
                 message=str(exc),
             )
     return None
+
+
+def _search_seed_for_source(source: Source) -> str:
+    city = str(source.config.get("city") or "").strip()
+    if city:
+        return city
+    if source.region:
+        return source.region.strip()
+    metadata = source.config.get("metadata")
+    if isinstance(metadata, dict):
+        address_text = str(metadata.get("address_text") or "").strip()
+        if address_text and (city := _city_like_seed_from_address(address_text, source.country)):
+            return city
+    return (source.country or "").strip()
+
+
+def _city_like_seed_from_address(address_text: str, country: str | None) -> str:
+    words = [
+        word.strip(",")
+        for word in address_text.split()
+        if word.strip(",") and not any(char.isdigit() for char in word)
+    ]
+    if len(words) < 2:
+        return ""
+    country_parts = [part.lower() for part in (country or "").split()]
+    while words and country_parts and words[-1].lower() == country_parts[-1]:
+        words.pop()
+    if len(words) < 2:
+        return ""
+    return " ".join(words[-2:])
 
 
 def configured_actions_from_source(source: Source) -> object:

@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 from collections import deque
@@ -48,15 +49,50 @@ SKIP_PATH_SUFFIXES = (
     ".zip",
 )
 COMMON_MEETING_PATHS = (
+    "/meeting/",
+    "/meeting",
     "/meetings/",
     "/meetings",
+    "/meetings/find-a-meeting",
+    "/meetings/find-a-meeting/",
+    "/groups/",
+    "/groups",
+    "/aa-groups/",
+    "/aa-groups",
+    "/a-a-groups/",
+    "/a-a-groups",
+    "/alcoholics-anonymous-groups/",
+    "/alcoholics-anonymous-groups",
     "/meeting-schedule",
     "/meeting-schedule/",
     "/meetings-schedule",
+    "/meetings-schedule/",
+    "/meeting-list",
+    "/meeting-list/",
+    "/meeting-locator",
+    "/meeting-locator/",
+    "/meeting-locations",
+    "/meeting-locations/",
+    "/locations",
+    "/locations/",
     "/find-a-meeting",
+    "/find-a-meeting/",
+    "/find-meeting/find-a-meeting",
+    "/find-meeting/find-a-meeting/",
     "/find-meeting",
+    "/find-meeting/",
+    "/find-meetings",
+    "/find-meetings/",
+    "/meeting-search",
+    "/meeting-search/",
+    "/meetings-search",
+    "/meetings-search/",
+    "/search-meetings",
+    "/search-meetings/",
     "/where-to-find",
+    "/where-to-find/",
     "/schedule",
+    "/schedule/",
     "/reunioes",
     "/reuniões",
     "/reuniones",
@@ -99,7 +135,11 @@ class BrowserCrawler:
                 context = await browser.new_context(user_agent=self.user_agent)
                 page = await context.new_page()
                 page.set_default_timeout(self.settings.page_timeout_ms)
-                queue = initial_crawl_queue(self.source.url)
+                remembered_urls = remembered_meeting_page_urls(self.source)
+                queue = initial_crawl_queue(
+                    self.source.url,
+                    remembered_urls=remembered_urls,
+                )
                 visited: set[str] = set()
                 visited_final: set[str] = set()
                 common_meeting_paths_enqueued = False
@@ -117,7 +157,10 @@ class BrowserCrawler:
                     ):
                         continue
                     visited.add(normalized)
-                    scraped = await self._scrape_page(page, normalized)
+                    scraped = await asyncio.wait_for(
+                        self._scrape_page(page, normalized),
+                        timeout=_page_hard_timeout_seconds(self.settings),
+                    )
                     final_normalized = normalize_crawl_url(scraped.final_url)
                     if final_normalized in visited_final:
                         continue
@@ -134,10 +177,19 @@ class BrowserCrawler:
                             queue = _without_common_meeting_path_links(queue, self.source.url)
                             broad_fallback_enqueued = True
                             broad_fallback = []
+                    has_pending_remembered_page = _has_pending_remembered_page(queue)
                     if self.source.source_type == SourceType.WORLD_SERVICE_LISTING:
-                        if should_stop_after_page(scraped, self.settings):
+                        if (
+                            not has_pending_remembered_page
+                            and should_stop_after_page(scraped, self.settings)
+                        ):
                             break
                         continue
+                    if depth >= 0 and should_stop_after_empty_meeting_directory(
+                        scraped,
+                        self.settings,
+                    ):
+                        break
                     if depth >= self.settings.max_depth:
                         if should_stop_after_page(
                             scraped,
@@ -148,11 +200,14 @@ class BrowserCrawler:
                         continue
                     links = await _page_links(page, scraped.final_url)
                     prioritized = prioritize_links(self.source.url, links)
-                    if should_stop_after_page(
-                        scraped,
-                        self.settings,
-                        prioritized_links=prioritized,
-                        pending_queue=queue,
+                    if (
+                        not has_pending_remembered_page
+                        and should_stop_after_page(
+                            scraped,
+                            self.settings,
+                            prioritized_links=prioritized,
+                            pending_queue=queue,
+                        )
                     ):
                         break
                     if prioritized:
@@ -331,8 +386,53 @@ def normalize_crawl_url(url: str) -> str:
     return urldefrag(url.strip())[0]
 
 
-def initial_crawl_queue(source_url: str) -> deque[tuple[str, int]]:
-    return deque([(source_url, 0)])
+def initial_crawl_queue(
+    source_url: str,
+    *,
+    remembered_urls: list[str] | None = None,
+) -> deque[tuple[str, int]]:
+    queue: deque[tuple[str, int]] = deque()
+    seen: set[str] = set()
+    for url in remembered_urls or []:
+        normalized = normalize_crawl_url(url)
+        if normalized in seen or not is_allowed_url(source_url, normalized):
+            continue
+        seen.add(normalized)
+        queue.append((normalized, -1))
+    normalized_source = normalize_crawl_url(source_url)
+    if normalized_source not in seen:
+        queue.append((normalized_source, 0))
+    return queue
+
+
+def remembered_meeting_page_urls(source: Source) -> list[str]:
+    scrape_config = source.config.get("scrape")
+    if not isinstance(scrape_config, dict):
+        return []
+    urls: list[str] = []
+    pages = scrape_config.get("successful_pages")
+    if isinstance(pages, list):
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            url = page.get("url")
+            if isinstance(url, str) and url.strip():
+                urls.append(url.strip())
+    legacy_urls = scrape_config.get("successful_page_urls")
+    if isinstance(legacy_urls, list):
+        urls.extend(url.strip() for url in legacy_urls if isinstance(url, str) and url.strip())
+    url = scrape_config.get("last_successful_page_url")
+    if isinstance(url, str) and url.strip():
+        urls.append(url.strip())
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        normalized = normalize_crawl_url(url)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped[:5]
 
 
 def common_meeting_path_links(source_url: str) -> list[dict[str, str]]:
@@ -397,6 +497,10 @@ def _without_common_meeting_path_links(
         for url, depth in queue
         if not is_common_meeting_path(source_url, normalize_crawl_url(url))
     )
+
+
+def _has_pending_remembered_page(queue: deque[tuple[str, int]]) -> bool:
+    return any(depth < 0 for _url, depth in queue)
 
 
 def _looks_like_not_found_page(page: ScrapedPage) -> bool:
@@ -469,6 +573,23 @@ def should_stop_after_page(
     )
 
 
+def should_stop_after_empty_meeting_directory(
+    page: ScrapedPage,
+    settings: CrawlSettings,
+) -> bool:
+    if page.extracted_count > 0 or _is_landing_page_url(page.final_url):
+        return False
+    if page.page_score < settings.successful_meeting_page_min_score:
+        return False
+    stop_signals = {
+        "strong_public_meeting_directory",
+        "meeting_form",
+        "meeting_table",
+        "tsml_json_feed",
+    }
+    return bool(stop_signals.intersection(page.page_signals))
+
+
 def _is_landing_page_url(url: str) -> bool:
     parsed = urlparse(url)
     return (parsed.path or "/").rstrip("/") in {"", "/"}
@@ -512,7 +633,11 @@ def _looks_like_pending_meeting_branch(url: str) -> bool:
     if _looks_like_deeper_meeting_directory_link(url, ""):
         return True
     path_parts = [part for part in path.split("/") if part]
-    return bool(path_parts and path_parts[0] in {"meeting", "meetings", "meeting-schedule"})
+    return bool(
+        path_parts
+        and path_parts[0]
+        in {"meeting", "meetings", "meeting-schedule", "groups", "aa-groups", "a-a-groups"}
+    )
 
 
 def _looks_like_deeper_meeting_directory_link(url: str, text: str) -> bool:
@@ -524,8 +649,26 @@ def _looks_like_deeper_meeting_directory_link(url: str, text: str) -> bool:
     if "strong_public_meeting_directory" in score.signals:
         return True
     last_segment = path.rsplit("/", 1)[-1]
-    directory_terms = ("meeting", "meetings", "schedule", "møteliste", "moteliste")
+    directory_terms = (
+        "meeting",
+        "meetings",
+        "group",
+        "groups",
+        "schedule",
+        "møteliste",
+        "moteliste",
+    )
     return score.score >= 0.5 and any(term in last_segment for term in directory_terms)
+
+
+def _page_hard_timeout_seconds(settings: CrawlSettings) -> float:
+    timeout_ms = (
+        settings.page_timeout_ms
+        + settings.deferred_render_timeout_ms
+        + (settings.action_timeout_ms * min(settings.max_actions_per_page, 4))
+        + 10_000
+    )
+    return max(20.0, timeout_ms / 1000)
 
 
 def _tsml_json_feed_url_from_html(html: str, base_url: str) -> str | None:
@@ -684,10 +827,15 @@ async def _safe_page_content(page: Any) -> str:
 
 
 async def _safe_body_text(page: Any) -> str:
-    try:
-        return str(await page.locator("body").inner_text(timeout=1_000))
-    except Exception:
-        return ""
+    texts: list[str] = []
+    for frame in getattr(page, "frames", [page]):
+        try:
+            text = str(await frame.locator("body").inner_text(timeout=1_000))
+        except Exception:
+            continue
+        if text.strip():
+            texts.append(text)
+    return "\n".join(texts)
 
 
 async def _wait_for_rendered_body_text(page: Any, settings: CrawlSettings) -> str:
