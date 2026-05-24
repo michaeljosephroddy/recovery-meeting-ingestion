@@ -1,0 +1,10 @@
+{
+  "files.watcherExclude": {
+    "**/.playwright-browsers/**": true,
+    "**/scrape_artifacts/**": true
+  },
+  "search.exclude": {
+    "**/.playwright-browsers/**": true,
+    "**/scrape_artifacts/**": true
+  }
+}

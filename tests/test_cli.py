@@ -1,16 +1,23 @@
+import asyncio
 import json
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
 from app.cli import (
     _ca_world_listings_shadowed_by_local_sources,
+    _persist_ingest_result,
+    _scrape_sources,
     _select_scrape_batch,
     _source_last_scrape_failed,
     _source_with_scrape_metadata,
     _source_with_scrape_status,
     app,
 )
-from app.scraping.models import ExtractedMeeting, ScrapedPage, ScrapeSourceResult
+from app.config import Settings
+from app.ingest import IngestResult
+from app.scraping.models import CrawlSettings, ExtractedMeeting, ScrapedPage, ScrapeSourceResult
+from app.scraping.service import ScrapeResult
 from app.sources.registry import Source, SourceType
 
 from .conftest import FIXTURES
@@ -149,6 +156,156 @@ def test_select_scrape_batch_applies_offset_before_limit() -> None:
     selected = _select_scrape_batch(sources, offset=2, limit=2)
 
     assert [source.id for source in selected] == ["aa-2", "aa-3"]
+
+
+async def test_scrape_sources_respects_concurrency(monkeypatch, tmp_path) -> None:
+    active = 0
+    max_seen = 0
+
+    async def fake_scrape_source(
+        source,
+        settings,
+        *,
+        fixture,
+        crawl_settings,
+        output_dir,
+    ):
+        nonlocal active, max_seen
+        assert fixture is None
+        assert isinstance(settings, Settings)
+        assert isinstance(crawl_settings, CrawlSettings)
+        assert output_dir == tmp_path
+        active += 1
+        max_seen = max(max_seen, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return ScrapeResult(
+            scrape=ScrapeSourceResult(
+                source_id=source.id,
+                source_url=source.url,
+                status="succeeded",
+            ),
+            ingest=IngestResult(raw_records=[], candidates=[], review_flags=[]),
+        )
+
+    monkeypatch.setattr("app.cli._scrape_source", fake_scrape_source)
+    sources = [
+        Source(
+            id=f"aa-{index}",
+            fellowship="aa",
+            name=f"Source {index}",
+            url=f"https://example.org/{index}",
+        )
+        for index in range(4)
+    ]
+
+    await _scrape_sources(
+        sources,
+        Settings(),
+        dry_run=True,
+        crawl_settings=CrawlSettings(),
+        output_dir=tmp_path,
+        concurrency=2,
+    )
+
+    assert max_seen == 2
+
+
+def test_persist_failed_scrape_does_not_replace_meetings_or_flags(monkeypatch) -> None:
+    events: list[tuple[str, object]] = []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def commit(self) -> None:
+            events.append(("commit", None))
+
+    class FakeSourceRepository:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def upsert_source(self, source):
+            events.append(("source_status", source.config["scrape"]["last_status"]))
+            return source
+
+    class FakeImportRunRepository:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def start(self, source_id):
+            events.append(("start", source_id))
+            return SimpleNamespace(id="run-1")
+
+        def finish(
+            self,
+            run_id,
+            *,
+            status,
+            records_fetched,
+            records_changed,
+            review_flags_created,
+            error_message=None,
+        ):
+            events.append(
+                (
+                    "finish",
+                    status,
+                    records_fetched,
+                    records_changed,
+                    review_flags_created,
+                    error_message,
+                )
+            )
+            return SimpleNamespace(id=run_id)
+
+    class UnexpectedRepository:
+        def __init__(self, connection):
+            raise AssertionError("failed scrapes must not replace meeting data")
+
+    monkeypatch.setattr("app.cli.connect", lambda settings: FakeConnection())
+    monkeypatch.setattr("app.cli.SourceRepository", FakeSourceRepository)
+    monkeypatch.setattr("app.cli.ImportRunRepository", FakeImportRunRepository)
+    monkeypatch.setattr("app.cli.RawMeetingRepository", UnexpectedRepository)
+    monkeypatch.setattr("app.cli.CanonicalMeetingRepository", UnexpectedRepository)
+    monkeypatch.setattr("app.cli.ReviewFlagRepository", UnexpectedRepository)
+
+    source = Source(
+        id="aa-failed",
+        fellowship="aa",
+        name="Failed AA",
+        url="https://example.org",
+    )
+    scrape = ScrapeSourceResult(
+        source_id=source.id,
+        source_url=source.url,
+        status="failed",
+        error_message="net::ERR_NAME_NOT_RESOLVED",
+    )
+
+    result = _persist_ingest_result(
+        Settings(),
+        source,
+        IngestResult(raw_records=[], candidates=[], review_flags=[]),
+        scrape=scrape,
+    )
+
+    assert result == {
+        "raw_records_stored": 0,
+        "canonical_meetings_upserted": 0,
+        "meetings_marked_missing": 0,
+        "review_flags_created": 0,
+        "import_run_id": "run-1",
+    }
+    assert events == [
+        ("source_status", "failed"),
+        ("start", "aa-failed"),
+        ("finish", "failed", 0, 0, 0, "net::ERR_NAME_NOT_RESOLVED"),
+        ("commit", None),
+    ]
 
 
 def test_source_with_scrape_metadata_marks_failed_source_for_retry_skip() -> None:

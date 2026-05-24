@@ -340,6 +340,13 @@ def scrape_all(
         int,
         typer.Option(help="Maximum pages to visit per source."),
     ] = 20,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            min=1,
+            help="Maximum number of sources to scrape concurrently.",
+        ),
+    ] = 1,
     only_unknown: Annotated[
         bool,
         typer.Option(help="Only scrape sources without a configured ingest adapter."),
@@ -388,32 +395,16 @@ def scrape_all(
         save_artifacts=save_artifacts,
         headless=not headful,
     )
-    for source in scrapeable:
-        try:
-            result = asyncio.run(
-                _scrape_source(
-                    source,
-                    settings,
-                    fixture=None,
-                    crawl_settings=crawl_settings,
-                    output_dir=output_dir if save_artifacts else None,
-                )
-            )
-            _print_scrape_result(f"- {source.id}", dry_run, source, result)
-            if not dry_run:
-                persisted = _persist_ingest_result(
-                    settings,
-                    source,
-                    result.ingest,
-                    scrape=result.scrape,
-                )
-                console.print(
-                    f"  stored={persisted['raw_records_stored']} "
-                    f"canonical={persisted['canonical_meetings_upserted']} "
-                    f"run={persisted['import_run_id']}"
-                )
-        except Exception as exc:
-            console.print(f"- {source.id} failed: {exc}")
+    asyncio.run(
+        _scrape_sources(
+            scrapeable,
+            settings,
+            dry_run=dry_run,
+            crawl_settings=crawl_settings,
+            output_dir=output_dir if save_artifacts else None,
+            concurrency=concurrency,
+        )
+    )
 
 
 @app.command("debug-scrape-source")
@@ -875,6 +866,61 @@ async def _scrape_source(
     return ScrapeResult(scrape=scrape, ingest=ingest_result)
 
 
+async def _scrape_sources(
+    sources: list[Source],
+    settings: Settings,
+    *,
+    dry_run: bool,
+    crawl_settings: CrawlSettings,
+    output_dir: Path | None,
+    concurrency: int,
+) -> None:
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+    persist_lock = asyncio.Lock()
+    print_lock = asyncio.Lock()
+    completed = 0
+    total = len(sources)
+
+    async def scrape_one(source: Source) -> None:
+        nonlocal completed
+        try:
+            async with semaphore:
+                result = await _scrape_source(
+                    source,
+                    settings,
+                    fixture=None,
+                    crawl_settings=crawl_settings,
+                    output_dir=output_dir,
+                )
+            persisted: dict[str, object] | None = None
+            if not dry_run:
+                async with persist_lock:
+                    persisted = await asyncio.to_thread(
+                        _persist_ingest_result,
+                        settings,
+                        source,
+                        result.ingest,
+                        scrape=result.scrape,
+                    )
+            async with print_lock:
+                _print_scrape_result(f"- {source.id}", dry_run, source, result)
+                if persisted is not None:
+                    console.print(
+                        f"  stored={persisted['raw_records_stored']} "
+                        f"canonical={persisted['canonical_meetings_upserted']} "
+                        f"run={persisted['import_run_id']}"
+                    )
+        except Exception as exc:
+            async with print_lock:
+                console.print(f"- {source.id} failed: {exc}")
+        finally:
+            completed += 1
+            async with print_lock:
+                console.print(f"progress: {completed}/{total}")
+
+    await asyncio.gather(*(scrape_one(source) for source in sources))
+
+
 def _as_browser_scrape_source(source: Source) -> Source:
     if source.adapter_type in {
         AdapterType.PLAYWRIGHT_BROWSER,
@@ -1106,11 +1152,33 @@ def _persist_ingest_result(
             error_message=scrape_error_message,
             successful_pages=scrape_successful_pages,
         )
+    scrape_failed = (scrape is not None and scrape.status == "failed") or scrape_status == "failed"
     with connect(settings) as connection:
         source_repository = SourceRepository(connection)
         stored_source = source_repository.upsert_source(source)
         run_repository = ImportRunRepository(connection)
         run = run_repository.start(stored_source.id)
+        if scrape_failed:
+            finished_run = run_repository.finish(
+                run.id,
+                status="failed",
+                records_fetched=0,
+                records_changed=0,
+                review_flags_created=0,
+                error_message=(
+                    scrape.error_message
+                    if scrape is not None
+                    else scrape_error_message
+                ),
+            )
+            connection.commit()
+            return {
+                "raw_records_stored": 0,
+                "canonical_meetings_upserted": 0,
+                "meetings_marked_missing": 0,
+                "review_flags_created": 0,
+                "import_run_id": finished_run.id,
+            }
         raw_repository = RawMeetingRepository(connection)
         canonical_repository = CanonicalMeetingRepository(connection)
         review_repository = ReviewFlagRepository(connection)

@@ -23,9 +23,12 @@ The work is operational and iterative. AA source discovery already exists in `ap
 - [x] (2026-05-24T01:28+01:00) Added frame text capture and rendered-column extraction for AA search result pages where visible rows are inside Wix/embedded frames. A dry-run of `aa-d9b59e67bf51` improved from 0 extracted records to 50 extracted records and 25 normalized candidates.
 - [x] (2026-05-24T02:00+01:00) Added scrape metadata persistence so failed browser scrapes set `config.scrape.last_status=failed` and are skipped by future `scrape-all` runs unless `--include-failed` is passed. Added the same metadata backfill to `import-artifacts --no-dry-run`, and added a stop condition for empty high-confidence meeting/search pages so the crawler does not continue into unrelated broad fallback links after finding the likely directory.
 - [x] (2026-05-24T02:05+01:00) Added remembered successful page URLs for all browser-scraped fellowships. Live scrapes and artifact imports now persist `config.scrape.successful_pages`; future runs seed the crawler with those pages before falling back to source-root scanning.
-- [ ] Run full AA scrape/import. The first full run is still in progress under `scrape_artifacts/aa-full-20260523T2341Z`; attempts to send Ctrl-C failed because the tool session stdin is closed, and the process is not visible from a fresh sandbox process listing. Completed source progress is persisted in the database. Latest checkpoint: 178 artifact directories, 185 distinct AA sources with import runs, and 30,182 AA canonical meetings.
-- [ ] Audit AA review flags and export a new reviewed snapshot.
+- [x] (2026-05-24T10:03+01:00) Added a bounded `scrape-all --concurrency` option. The default remains serial, while operators can now run multiple source scrapes concurrently for AA, CA, NA, or all fellowships. Focused validation passed with `ruff`, `mypy`, and `tests/test_cli.py`.
+- [x] (2026-05-24T10:49+01:00) Completed the full AA scrape/import resume. The offset 463 resume wrote `scrape_artifacts/aa-full-resume-20260524T092816Z` at concurrency 4 through progress 51/215, then the remaining batch resumed at offset 514 with concurrency 8 into `scrape_artifacts/aa-full-resume-20260524T093353Z` and completed 164/164. The concurrency-8 batch finished with 147 succeeded sources, 17 failed sources, 13,884 normalized candidates, and 9,317 review flags. Across all AA browser sources, 664 distinct AA sources now have import runs, and the database contains 94,394 active AA canonical meetings.
+- [x] (2026-05-24T10:49+01:00) Audited AA review blockers and exported a new snapshot. The audit found two open AA `source_large_drop` errors: Northern Virginia Intergroup and the local fixture-style `aa-ie-feed`. Northern Virginia was restored by reimporting the successful artifact `scrape_artifacts/aa-full-resume-20260524T092816Z/aa-4f1f1cdaa6f9/summary.json`; the `aa-ie-feed` stale-source error was resolved because the source points at `https://example.org/meetings.json` and has no active meetings. `export-snapshot --no-dry-run` wrote `snapshots/meetings-2026-05-24T094908Z.json` and `snapshots/latest.json` with 99,416 active meetings total, including 94,394 AA meetings, and `blocked_by_review=0`.
+- [x] (2026-05-24T10:49+01:00) Fixed failed-scrape persistence so a failed scrape records source metadata and a failed import run without replacing canonical meetings or review flags. Added a regression test proving failed scrapes do not mark existing meetings stale.
 - [x] (2026-05-24T02:05+01:00) Ran validation after the latest scraper/resume changes: `.venv/bin/ruff check app tests`, `.venv/bin/pytest tests/test_cli.py tests/test_scraping_primitives.py tests/test_artifact_import.py -q`, `.venv/bin/mypy app`, and `.venv/bin/pytest -q` all passed.
+- [x] (2026-05-24T10:49+01:00) Ran focused validation after the concurrency and failed-scrape persistence changes: `.venv/bin/ruff check app tests`, `.venv/bin/pytest tests/test_cli.py -q`, and `.venv/bin/mypy app` all passed.
 
 ## Surprises & Discoveries
 
@@ -53,6 +56,12 @@ The work is operational and iterative. AA source discovery already exists in `ap
     Evidence: The `aa-d9b59e67bf51` screenshot showed a meeting table, but the main frame body text omitted it. Inspecting page frames showed the table under `www-aanc24-org.filesusr.com/html/...`; collecting all frame body text and parsing tabbed column rows extracted 50 records.
 - Observation: The first full AA scrape could not be interactively stopped through the existing tool session.
     Evidence: Polling session `75383` still returns new scrape output, but sending Ctrl-C fails with `stdin is closed`, and `pgrep` from a fresh command only sees the new command wrapper rather than the original scrape process. Artifact and database checkpoints are therefore the reliable recovery markers.
+- Observation: `--offset` is sensitive to status filtering.
+    Evidence: `scrape-all` filters previously failed sources before applying `_select_scrape_batch`. During the concurrency switch, the first resumed run reached progress 51/215, then the next run used offset 514. Because some earlier sources had become failed and were excluded from the second source list, the offset boundary drifted. The final database still shows import runs for all 664 AA browser sources, but future interrupted resumes should prefer artifact/source-id checkpoints over relying only on a numeric offset after the source status set has changed.
+- Observation: Failed browser scrapes were able to stale out existing meetings.
+    Evidence: `aa-4f1f1cdaa6f9` first imported 576 Northern Virginia meetings from `https://nvintergroup.org/feed/json`, then a later failed scrape persisted zero candidates and created an open `source_large_drop` error while marking the 576 meetings `stale`. The fix now treats failed scrape persistence as metadata-only for canonical meeting data.
+- Observation: Open AA review errors were cleared before export, but many warnings remain for later quality work.
+    Evidence: After resolving the two open `source_large_drop` errors, `export-snapshot --dry-run` reported `blocked_by_review: 0`. The remaining AA open warnings totaled 37,658 and were dominated by `possible_personal_contact`, `possible_private_online_credential`, and one high-volume `missing_timezone` source, `aa-fd84ea48efda`.
 
 ## Decision Log
 
@@ -83,10 +92,21 @@ The work is operational and iterative. AA source discovery already exists in `ap
 - Decision: Remember successful meeting pages per source.
     Rationale: Repeat scrapes should not have to rediscover known meeting directories. Successful browser pages are stored in `sources.config.scrape.successful_pages` with URL, extracted record count, score, and signals. The crawler tries those remembered URLs first for AA, CA, NA, and any future browser-scraped fellowship, then falls back to normal source-root and common-path scanning if the remembered pages are stale or empty.
     Date/Author: 2026-05-24 / Codex.
+- Decision: Add bounded source-level concurrency to `scrape-all` rather than parallelizing pages inside a source.
+    Rationale: Source-level concurrency is the smallest change that improves full-pass scrape time across AA, CA, and NA while preserving each crawler's per-source page ordering, artifact layout, and timeout behavior. Database persistence remains bounded so concurrent browser work does not create avoidable write contention.
+    Date/Author: 2026-05-24 / Codex.
+- Decision: Persist failed scrapes without replacing canonical meetings or review flags.
+    Rationale: A failed browser run indicates that the source could not be checked, not that all previously known meetings disappeared. Source scrape metadata and a failed import run are still useful evidence, but canonical rows and source review flags should only be replaced by a successful scrape or artifact import.
+    Date/Author: 2026-05-24 / Codex.
+- Decision: Resolve the `aa-ie-feed` large-drop error instead of reactivating its fixture meetings.
+    Rationale: `aa-ie-feed` is a local fixture-style source with URL `https://example.org/meetings.json`, not a real AA source. Its two canonical rows were already stale and should not be reintroduced into the public snapshot. Resolving its stale-source error unblocked export without adding fake active meetings.
+    Date/Author: 2026-05-24 / Codex.
 
 ## Outcomes & Retrospective
 
 The controlled AA scrape proved the browser path can ingest AA meetings at meaningful scale: AA canonical meetings increased from 114 to more than 3,000 after controlled source reruns and the first part of the full pass. The main remaining risk is not browser availability, but hidden/search-backed local meeting directories. The current code now targets AA search/list route names and form patterns directly, but Wix-style meeting pages may still need a dedicated data extractor in a later pass.
+
+The full AA pass has now completed and produced a publishable snapshot. `snapshots/latest.json` contains 94,394 AA meetings, up from the baseline of 114, with 99,416 active meetings total across AA, CA, and NA. The snapshot is not blocked by open error flags. The main remaining quality work is warning reduction, especially contact/online credential warnings that may be false positives for legitimate group phone numbers or meeting passwords, and the Montreal Spanish intergroup missing-timezone cluster.
 
 ## Context and Orientation
 
@@ -126,6 +146,8 @@ After the controlled batch is good enough, run the full AA scrape:
 Finally, audit review flags and export a new snapshot:
 
     .venv/bin/python -m app.cli export-snapshot --no-dry-run
+
+The full AA pass has completed. Future AA work should start from warning audit and targeted reruns rather than another full scrape.
 
 ## Concrete Steps
 
@@ -168,6 +190,36 @@ Persisted AA discovery and adapter preservation notes:
     RUN_DB_TESTS=1 .venv/bin/pytest tests/test_repositories_db.py -q
     7 passed in 1.38s
 
+Final AA resume and export transcript excerpts:
+
+    PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers .venv/bin/python -m app.cli scrape-all --fellowship aa --offset 514 --max-pages-per-source 3 --concurrency 8 --output-dir scrape_artifacts/aa-full-resume-20260524T093353Z --no-dry-run
+    Scrape all dry_run=False
+    sources: 164
+    ...
+    progress: 164/164
+
+    awk summary for scrape_artifacts/aa-full-resume-20260524T093353Z.log:
+    succeeded=147
+    failed=17
+    candidates=13884
+    review_flags=9317
+
+    .venv/bin/python -m app.cli import-artifacts scrape_artifacts/aa-full-resume-20260524T092816Z/aa-4f1f1cdaa6f9/summary.json --no-dry-run
+    records_extracted: 576
+    candidates_normalized: 576
+    canonical_meetings_upserted: 576
+
+    .venv/bin/python -m app.cli export-snapshot --no-dry-run
+    active_meetings: 99416
+    stale_meetings: 0
+    blocked_by_review: 0
+    output: snapshots/meetings-2026-05-24T094908Z.json
+    snapshot_id: c6693781-3cb6-4e4c-9146-739b2b42356f
+
+Final exported fellowship counts:
+
+    snapshots/latest.json: aa=94394, ca=2341, na=2681
+
 ## Validation and Acceptance
 
 The AA pass is successful when all of the following are true:
@@ -183,19 +235,34 @@ The AA pass is successful when all of the following are true:
 
 Discovery is idempotent because source rows are upserted by normalized URL and fellowship. Scraping a source is also idempotent at the canonical level because meetings are upserted by source identity fields. Browser scrape outcomes are written to `sources.config.scrape`; a failed scrape is skipped by future `scrape-all` runs unless retried with `--include-failed`. Successful page URLs are also stored in `sources.config.scrape.successful_pages` and tried first on future browser scrapes. Artifact directories are timestamped, so reruns do not overwrite previous evidence.
 
-If the current full run needs to be resumed after it stops, derive the offset from the completed artifact directory count and use a smaller per-source page cap:
+If a future full run needs to be resumed after it stops, derive the offset from the completed artifact directory count and use a smaller per-source page cap:
 
     PROCESSED=$(find scrape_artifacts/aa-full-20260523T2341Z -mindepth 1 -maxdepth 1 -type d | wc -l)
     PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers .venv/bin/python -m app.cli scrape-all --fellowship aa --offset "$PROCESSED" --max-pages-per-source 3 --output-dir scrape_artifacts/aa-full-resume-YYYYMMDDTHHMMSSZ --no-dry-run
+
+Historical resume command after the 2026-05-24T10:25+01:00 pause:
+
+    OUT="scrape_artifacts/aa-full-resume-$(date -u +%Y%m%dT%H%M%SZ)"
+    PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers .venv/bin/python -m app.cli scrape-all --fellowship aa --offset 463 --max-pages-per-source 3 --concurrency 4 --output-dir "$OUT" --no-dry-run > "$OUT.log" 2>&1
+
+`--concurrency 10` and `--concurrency 6` were both functional, but drove CPU to uncomfortable levels in VS Code. `--concurrency 4` was chosen as the current safer resume setting. Running from a normal shell with output redirected to a log should avoid VS Code terminal rendering overhead; `.vscode/settings.json` now excludes `scrape_artifacts/**` and `.playwright-browsers/**` from VS Code file watching/search.
+
+After VS Code was closed, `--concurrency 8` was used successfully for the final 164-source resume. Be careful using numeric offsets after a partial run has marked sources failed, because `scrape-all` excludes failed sources unless `--include-failed` is passed before applying `--offset`. For future resumes, compare artifact source IDs against the selected source list or resume from an unchanged shell session when possible.
 
 If a scrape batch produces bad canonical records, inspect `review_flags`, source artifacts, and raw payloads before exporting. Prefer fixing extraction and rerunning the affected source over deleting database rows manually.
 
 ## Artifacts and Notes
 
-This section will be updated with controlled-batch artifact paths, source IDs, and summary counts.
+Important AA artifacts:
+
+- `scrape_artifacts/aa-full-resume-20260524T092816Z`: concurrency-4 resume from offset 463. It reached progress 51/215 before the run was stopped/replaced. Its Northern Virginia artifact `aa-4f1f1cdaa6f9/summary.json` is the successful 576-record artifact used to restore that source after a later failed scrape.
+- `scrape_artifacts/aa-full-resume-20260524T093353Z`: concurrency-8 final resume from offset 514. It completed 164/164, with 147 succeeded, 17 failed, 13,884 normalized candidates, and 9,317 review flags.
+- `snapshots/meetings-2026-05-24T094908Z.json` and `snapshots/latest.json`: final exported snapshot with `aa=94394`, `ca=2341`, and `na=2681`.
 
 ## Interfaces and Dependencies
 
 Use the existing CLI in `app/cli.py`. Use the existing Playwright browser scraper through `scrape-all` and `debug-scrape-source`. Use the existing database connection from `app/config.py`. Do not add a second scraping framework unless the controlled batch proves the existing browser-first path cannot handle a repeated AA pattern.
 
 Plan revision note: Created on 2026-05-23 to turn the user's request to scrape AA meetings into a repeatable, auditable operational pass.
+
+Plan revision note: Updated on 2026-05-24 after completing the AA full scrape/import, fixing failed-scrape persistence, clearing open review errors, and exporting `snapshots/meetings-2026-05-24T094908Z.json`.
