@@ -26,7 +26,6 @@ def flags_for_candidate(candidate: CanonicalMeetingCandidate) -> list[ReviewFlag
         for value in (
             candidate.accessibility_notes,
             candidate.phone_join_info,
-            str(candidate.online_url) if candidate.online_url else None,
         )
         if value
     )
@@ -37,15 +36,6 @@ def flags_for_candidate(candidate: CanonicalMeetingCandidate) -> list[ReviewFlag
                 code="possible_personal_contact",
                 severity="warning",
                 message="candidate contains possible personal email or phone information",
-                source_record_id=candidate.source_record_id,
-            )
-        )
-    if ONLINE_CREDENTIAL_RE.search(notes):
-        flags.append(
-            ReviewFlag(
-                code="possible_private_online_credential",
-                severity="warning",
-                message="candidate contains possible online meeting credential",
                 source_record_id=candidate.source_record_id,
             )
         )

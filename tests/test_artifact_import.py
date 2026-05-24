@@ -207,6 +207,4 @@ def test_artifact_import_expands_daily_meeting_to_all_weekdays(tmp_path) -> None
         6,
     ]
     assert result.ingest.candidates[0].occurrences[0].timezone == "Europe/Warsaw"
-    assert [flag.code for flag in result.ingest.review_flags] == [
-        "possible_private_online_credential",
-    ]
+    assert [flag.code for flag in result.ingest.review_flags] == []

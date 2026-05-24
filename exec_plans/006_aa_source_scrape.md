@@ -30,6 +30,7 @@ The work is operational and iterative. AA source discovery already exists in `ap
 - [x] (2026-05-24T02:05+01:00) Ran validation after the latest scraper/resume changes: `.venv/bin/ruff check app tests`, `.venv/bin/pytest tests/test_cli.py tests/test_scraping_primitives.py tests/test_artifact_import.py -q`, `.venv/bin/mypy app`, and `.venv/bin/pytest -q` all passed.
 - [x] (2026-05-24T10:49+01:00) Ran focused validation after the concurrency and failed-scrape persistence changes: `.venv/bin/ruff check app tests`, `.venv/bin/pytest tests/test_cli.py -q`, and `.venv/bin/mypy app` all passed.
 - [x] (2026-05-24T10:56+01:00) Cleared the largest AA missing-timezone warning cluster. Canadian province abbreviation support and address-based Canada/province inference now let the Montreal Spanish intergroup TSML rows infer timezones from addresses such as `Saint-Jérôme, QC, Canada`. Reimporting `scrape_artifacts/aa-full-resume-20260524T093353Z/aa-fd84ea48efda/summary.json` reduced that source from 2,540 open warnings to 763 and reduced AA open warnings from 37,658 to 35,881. A refreshed snapshot was exported at `snapshots/meetings-2026-05-24T095621Z.json` with `blocked_by_review=0`.
+- [x] (2026-05-24T11:06+01:00) Removed review noise for listed online meeting credentials. Published Zoom URLs, meeting IDs, passcodes, and passwords remain in meeting fields but no longer create `possible_private_online_credential` warnings or get misread as personal phone numbers. Reimported 203 artifact-backed AA sources and resolved stale credential/contact warnings that no longer match the updated rule. AA open warnings fell from 35,881 to 10,375, with `possible_private_online_credential=0`. A refreshed snapshot was exported at `snapshots/meetings-2026-05-24T100627Z.json` with `blocked_by_review=0`.
 
 ## Surprises & Discoveries
 
@@ -65,6 +66,8 @@ The work is operational and iterative. AA source discovery already exists in `ap
     Evidence: After resolving the two open `source_large_drop` errors, `export-snapshot --dry-run` reported `blocked_by_review: 0`. The remaining AA open warnings totaled 37,658 and were dominated by `possible_personal_contact`, `possible_private_online_credential`, and one high-volume `missing_timezone` source, `aa-fd84ea48efda`.
 - Observation: The Montreal Spanish intergroup feed covers Quebec plus a few New Brunswick and Nunavut rows.
     Evidence: After address-based Canada/province inference, `aa-fd84ea48efda` occurrences used `America/Toronto` for 1,765 rows, `America/Moncton` for 11 New Brunswick rows, and `America/Iqaluit` for one Iqaluit row. The source no longer has open `missing_timezone` warnings.
+- Observation: Online meeting credentials are expected meeting access data, not private leakage.
+    Evidence: Samples from New York, Australia, and Seattle showed `possible_private_online_credential` warnings were ordinary listed Zoom meeting IDs, passcodes, passwords, and Zoom URLs. After removing the credential warning rule and excluding `online_url` from the personal-contact scan, AA `possible_private_online_credential` warnings dropped to 0 while exported meeting access fields were preserved.
 
 ## Decision Log
 
@@ -107,12 +110,15 @@ The work is operational and iterative. AA source discovery already exists in `ap
 - Decision: Infer Canadian timezones from address province abbreviations for static/browser-normalized rows.
     Rationale: TSML JSON and rendered rows often include a full postal address but no explicit source country or timezone. Province abbreviations such as `QC`, `NB`, and `NU` are enough to choose a canonical timezone without source-specific configuration, and this also handles multi-province feeds correctly.
     Date/Author: 2026-05-24 / Codex.
+- Decision: Stop warning on listed online meeting credentials.
+    Rationale: Meeting IDs, passcodes, passwords, and Zoom URLs are necessary access information when they are published by the source listing. Keeping them in the normalized meeting data is correct, and warning on every occurrence made the review queue noisy without improving safety.
+    Date/Author: 2026-05-24 / Codex.
 
 ## Outcomes & Retrospective
 
 The controlled AA scrape proved the browser path can ingest AA meetings at meaningful scale: AA canonical meetings increased from 114 to more than 3,000 after controlled source reruns and the first part of the full pass. The main remaining risk is not browser availability, but hidden/search-backed local meeting directories. The current code now targets AA search/list route names and form patterns directly, but Wix-style meeting pages may still need a dedicated data extractor in a later pass.
 
-The full AA pass has now completed and produced a publishable snapshot. `snapshots/latest.json` contains 94,394 AA meetings, up from the baseline of 114, with 99,416 active meetings total across AA, CA, and NA. The snapshot is not blocked by open error flags. The largest missing-timezone cluster has been cleared. The main remaining quality work is warning reduction for contact/online credential warnings that may be false positives for legitimate group phone numbers or meeting passwords.
+The full AA pass has now completed and produced a publishable snapshot. `snapshots/latest.json` contains 94,394 AA meetings, up from the baseline of 114, with 99,416 active meetings total across AA, CA, and NA. The snapshot is not blocked by open error flags. The largest missing-timezone cluster has been cleared, and listed online meeting credentials no longer create warnings. The main remaining quality work is deciding whether explicit published group contact phone numbers and emails should remain warning-worthy.
 
 ## Context and Orientation
 
@@ -244,6 +250,26 @@ Montreal timezone cleanup transcript excerpts:
     blocked_by_review: 0
     output: snapshots/meetings-2026-05-24T095621Z.json
 
+Credential warning cleanup transcript excerpts:
+
+    Reimported artifact-backed contact/credential warning sources:
+    sources=203
+
+    Resolved stale warnings under the new review rule:
+    possible_private_online_credential=5636
+    possible_personal_contact=2799
+
+    AA open warnings after cleanup:
+    possible_personal_contact=8669
+    missing_timezone=1038
+    scrape_low_confidence=668
+    possible_private_online_credential=0
+
+    .venv/bin/python -m app.cli export-snapshot --no-dry-run
+    active_meetings: 99416
+    blocked_by_review: 0
+    output: snapshots/meetings-2026-05-24T100627Z.json
+
 ## Validation and Acceptance
 
 The AA pass is successful when all of the following are true:
@@ -282,7 +308,8 @@ Important AA artifacts:
 - `scrape_artifacts/aa-full-resume-20260524T092816Z`: concurrency-4 resume from offset 463. It reached progress 51/215 before the run was stopped/replaced. Its Northern Virginia artifact `aa-4f1f1cdaa6f9/summary.json` is the successful 576-record artifact used to restore that source after a later failed scrape.
 - `scrape_artifacts/aa-full-resume-20260524T093353Z`: concurrency-8 final resume from offset 514. It completed 164/164, with 147 succeeded, 17 failed, 13,884 normalized candidates, and 9,317 review flags.
 - `snapshots/meetings-2026-05-24T094908Z.json`: first final AA export after clearing open error flags.
-- `snapshots/meetings-2026-05-24T095621Z.json` and `snapshots/latest.json`: refreshed export after clearing the Montreal missing-timezone cluster, with `aa=94394`, `ca=2341`, and `na=2681`.
+- `snapshots/meetings-2026-05-24T095621Z.json`: refreshed export after clearing the Montreal missing-timezone cluster.
+- `snapshots/meetings-2026-05-24T100627Z.json` and `snapshots/latest.json`: refreshed export after clearing credential warning noise, with `aa=94394`, `ca=2341`, and `na=2681`.
 
 ## Interfaces and Dependencies
 
@@ -293,3 +320,5 @@ Plan revision note: Created on 2026-05-23 to turn the user's request to scrape A
 Plan revision note: Updated on 2026-05-24 after completing the AA full scrape/import, fixing failed-scrape persistence, clearing open review errors, and exporting `snapshots/meetings-2026-05-24T094908Z.json`.
 
 Plan revision note: Updated on 2026-05-24 after clearing the largest AA missing-timezone cluster and exporting `snapshots/meetings-2026-05-24T095621Z.json`.
+
+Plan revision note: Updated on 2026-05-24 after removing listed online meeting credential warnings and exporting `snapshots/meetings-2026-05-24T100627Z.json`.

@@ -18,11 +18,10 @@ def test_review_flags_sensitive_contact_and_missing_timezone() -> None:
 
     codes = {flag.code for flag in flags_for_candidate(candidate)}
     assert "possible_personal_contact" in codes
-    assert "possible_private_online_credential" in codes
     assert "missing_timezone" in codes
 
 
-def test_review_flags_do_not_treat_meeting_id_as_personal_phone() -> None:
+def test_review_flags_do_not_treat_meeting_credentials_as_review_noise() -> None:
     candidate = CanonicalMeetingCandidate(
         fellowship="ca",
         source_id="ca-online",
@@ -37,7 +36,25 @@ def test_review_flags_do_not_treat_meeting_id_as_personal_phone() -> None:
     )
 
     codes = {flag.code for flag in flags_for_candidate(candidate)}
-    assert "possible_private_online_credential" in codes
+    assert "possible_private_online_credential" not in codes
+    assert "possible_personal_contact" not in codes
+
+
+def test_review_flags_do_not_treat_zoom_url_as_personal_phone() -> None:
+    candidate = CanonicalMeetingCandidate(
+        fellowship="aa",
+        source_id="aa-online",
+        source_record_id="online",
+        source_url="https://example.org/meetings",
+        name="Online Meeting",
+        meeting_type="online",
+        online_url="https://zoom.us/j/83622389914",
+        occurrences=[
+            MeetingOccurrence(day_of_week=1, start_time_local="08:00", timezone="America/New_York")
+        ],
+    )
+
+    codes = {flag.code for flag in flags_for_candidate(candidate)}
     assert "possible_personal_contact" not in codes
 
 
