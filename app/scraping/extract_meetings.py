@@ -1466,9 +1466,10 @@ def _merge_inline_location_detail(payload: dict[str, Any], detail: str) -> None:
 
 def _split_before_connection_marker(line: str) -> tuple[str, str] | None:
     match = re.search(
-        r"(?:\b(?:telephone|phone|tel\.?|meeting\s+id|join\s+(?:zoom\s+)?meeting|"
+        r"(?:\b(?:telephone|phone|tel\.?|meeting\s+id|j\s*oin\s+(?:zoom\s+)?meeting|"
         r"passcode|password|access\s+code|telefon(?:meeting)?|pin|kenncode|passwort)\b|"
         r"meeting[-\s]*id|zoom[-\s]*meetings?[-\s]*id|einwahl[-\s]*nr\.?|\bcode\s*:|"
+        r"one\s+tap\s+mobile|dial\s+by\s+phone|"
         r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4})",
         line,
         flags=re.IGNORECASE,
@@ -1509,6 +1510,12 @@ def _clean_inline_meeting_name_candidate(name: str) -> str:
     cleaned = _clean_fragment(NAME_TIME_RE.sub("", cleaned))
     cleaned = re.sub(
         r"^(?:daily|everyday|en\s+espanol|en\s+español)\b\s*[,:-]?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^(?:pacific|eastern|central|mountain)(?:\s*\([^)]*\))?\s*[,:-]?\s*",
         "",
         cleaned,
         flags=re.IGNORECASE,

@@ -369,6 +369,33 @@ def test_extract_day_section_splits_inline_phone_meeting_name() -> None:
     assert meetings[0].confidence >= 0.75
 
 
+def test_extract_day_section_splits_inline_one_tap_mobile_details() -> None:
+    html = """
+    <article>
+      <div class="entry-content">
+        <h3>Tuesday</h3>
+        <p>
+          7:00 AM Pacific (M-F ) 7AM Coastside Group (Half Moon Bay)
+          J oin Meeting: 7AM Coastside Group One tap mobile:
+          +16699006833,,790124889# Dial by phone: 669-900-6833
+          Meeting ID: 790 124 889
+        </p>
+      </div>
+    </article>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/online-meetings",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].payload["name"] == "Coastside Group (Half Moon Bay)"
+    assert "One tap mobile" in meetings[0].payload["phone_join_info"]
+    assert "Meeting ID: 790 124 889" in meetings[0].payload["phone_join_info"]
+    assert meetings[0].confidence >= 0.75
+
+
 def test_extract_day_section_splits_inline_labeled_remote_meeting_name() -> None:
     html = """
     <article>
