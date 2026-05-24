@@ -33,6 +33,7 @@ The work is operational and iterative. AA source discovery already exists in `ap
 - [x] (2026-05-24T11:06+01:00) Removed review noise for listed online meeting credentials. Published Zoom URLs, meeting IDs, passcodes, and passwords remain in meeting fields but no longer create `possible_private_online_credential` warnings or get misread as personal phone numbers. Reimported 203 artifact-backed AA sources and resolved stale credential/contact warnings that no longer match the updated rule. AA open warnings fell from 35,881 to 10,375, with `possible_private_online_credential=0`. A refreshed snapshot was exported at `snapshots/meetings-2026-05-24T100627Z.json` with `blocked_by_review=0`.
 - [x] (2026-05-24T11:35+01:00) Removed review noise for all contact information listed on meeting records. Published group phone numbers, emails, Zoom URLs, meeting IDs, passwords, and passcodes are treated as meeting access data and remain in the export without contact/credential warnings. Resolved 8,669 remaining open AA `possible_personal_contact` warnings. AA open warnings now consist only of `missing_timezone=1038` and `scrape_low_confidence=668`. A refreshed snapshot was exported at `snapshots/meetings-2026-05-24T103541Z.json` with `blocked_by_review=0`.
 - [x] (2026-05-24T11:51+01:00) Cleared all remaining open AA `missing_timezone` warnings. Added Mexico state, US state abbreviation, country, region, and source-text timezone inference for static/browser-normalized records; reimported the artifact-backed warning sources; then applied a targeted database repair for six single-timezone sources that had no usable artifact rerun path or already had source-level timezone metadata. The repair updated 49 `UTC` occurrences and resolved 49 stale timezone flags. AA open warnings now consist only of `scrape_low_confidence=668`, with zero open AA errors. A refreshed snapshot was exported at `snapshots/meetings-2026-05-24T105140Z.json` with `blocked_by_review=0`.
+- [x] (2026-05-24T12:16+01:00) Reduced AA `scrape_low_confidence` warnings from 668 to 219. Added conservative inline name splitting for day-section rows where source pages render `time + name + access/location` in one line, preserving meeting credentials and contact details while recovering names. Reran selected sources, restored count regressions from prior full-scrape artifacts, and resolved only the clean Dunedin text-block warnings. The remaining 219 warnings are dominated by damaged rows with placeholder, numeric, or missing names and should stay open for extractor-specific repair. A refreshed snapshot was exported at `snapshots/meetings-2026-05-24T111614Z.json` with `blocked_by_review=0`.
 
 ## Surprises & Discoveries
 
@@ -76,6 +77,10 @@ The work is operational and iterative. AA source discovery already exists in `ap
     Evidence: Mexico rows such as `Av San Francisco 3332, Jardines de Los Arcos, 44500 Guadalajara, Jal., Mexico` were initially parsed as Delaware because the Spanish word fragment `de` matched the US abbreviation `DE`. Restricting US state abbreviation matching to addresses that identify as US restored correct Mexico parsing and let `aa-ff7ef318febb` reimport with 0 flags.
 - Observation: The final 49 timezone warnings were stale data repair cases rather than extractor gaps.
     Evidence: The remaining sources were Kazakhstan, St. Lucie Florida, Kingston Jamaica, Trinidad & Tobago, Malta, and Guyana. They either had no artifact directory, had already-known source timezone metadata, or had source names/countries that map to a single timezone. A targeted repair updated exactly 49 matching `UTC` occurrences and resolved exactly 49 `missing_timezone` flags.
+- Observation: The low-confidence warnings were mixed quality, not a single class of noise.
+    Evidence: Before cleanup, the 668 warnings included 592 rows named `Recovery Meeting`, 34 numeric-name rows, 31 rows with specific names, 7 rows with no location fields, and 4 label-name rows such as `Name:` or `Buscar:`. After reruns and targeted resolution, 219 warnings remain: 165 `Recovery Meeting`, 34 numeric-name, 9 specific-name, 7 no-location, and 4 label-name rows.
+- Observation: Some short live reruns can improve names but still must be checked against source counts.
+    Evidence: The source-specific rerun loop reduced warnings for sources such as Sioux Falls, Akron, Lancaster, and San Mateo, but a `--max-pages 4` cap shortened Paris, Northern Nevada, Waterloo/Cedar Falls, Worcester, and Midland relative to prior artifacts. Those sources were restored from their previous full-scrape summaries before export.
 
 ## Decision Log
 
@@ -127,12 +132,15 @@ The work is operational and iterative. AA source discovery already exists in `ap
 - Decision: Use geography inference plus a narrow database repair for the final missing timezone cleanup.
     Rationale: Artifact-backed sources should be corrected through normalization and reimport. For sources without artifacts, or rows whose source already carries an unambiguous timezone/country signal, updating `UTC` occurrences and resolving only matching open `missing_timezone` flags is more accurate than rerunning a nonexistent scrape artifact or leaving stale warnings.
     Date/Author: 2026-05-24 / Codex.
+- Decision: Leave damaged low-confidence rows open instead of resolving the queue to zero.
+    Rationale: Low-confidence rows still include records with placeholder names, numeric names, generic labels, or missing location fields. Those are real data-quality issues. Only rows with recovered names or demonstrably clean meeting details should be resolved; the remaining warnings are useful work items for later source-specific extraction fixes.
+    Date/Author: 2026-05-24 / Codex.
 
 ## Outcomes & Retrospective
 
 The controlled AA scrape proved the browser path can ingest AA meetings at meaningful scale: AA canonical meetings increased from 114 to more than 3,000 after controlled source reruns and the first part of the full pass. The main remaining risk is not browser availability, but hidden/search-backed local meeting directories. The current code now targets AA search/list route names and form patterns directly, but Wix-style meeting pages may still need a dedicated data extractor in a later pass.
 
-The full AA pass has now completed and produced a publishable snapshot. `snapshots/latest.json` contains 94,394 AA meetings, up from the baseline of 114, with 99,416 active meetings total across AA, CA, and NA. The snapshot is not blocked by open error flags. Listed meeting contact details and online meeting credentials no longer create warnings, and all open AA missing-timezone warnings have been cleared. The main remaining quality work is resolving the 668 low scrape confidence warnings.
+The full AA pass has now completed and produced a publishable snapshot. `snapshots/latest.json` contains 95,471 AA meetings, up from the baseline of 114, with 100,493 active meetings total across AA, CA, and NA. The snapshot is not blocked by open error flags. Listed meeting contact details and online meeting credentials no longer create warnings, all open AA missing-timezone warnings have been cleared, and low scrape-confidence warnings have been reduced to the rows that still need real extraction repair.
 
 ## Context and Orientation
 
@@ -321,6 +329,34 @@ Final missing-timezone cleanup transcript excerpts:
     output: snapshots/meetings-2026-05-24T105140Z.json
     snapshot_id: 1e35f74c-037d-460f-9ef2-d5f5664acaf4
 
+Low-confidence cleanup transcript excerpts:
+
+    Added day-section inline name splitting for lines like:
+    time + meeting name + Zoom/Meeting ID/access details
+    time + meeting name + city/address/format details
+
+    Source-specific reruns reduced AA scrape_low_confidence:
+    before=668
+    after=219
+
+    Regressed short reruns restored from prior artifacts:
+    aa-0e401fcbda72
+    aa-267f546cc6a1
+    aa-5b043cc2986f
+    aa-ee15b2b762f4
+    aa-efd863bebe61
+
+    Remaining AA open warnings:
+    scrape_low_confidence=219
+    open AA errors=0
+
+    .venv/bin/python -m app.cli export-snapshot --no-dry-run
+    active_meetings: 100493
+    stale_meetings: 0
+    blocked_by_review: 0
+    output: snapshots/meetings-2026-05-24T111614Z.json
+    snapshot_id: 329e1289-1354-4113-be37-1b2321916d78
+
 ## Validation and Acceptance
 
 The AA pass is successful when all of the following are true:
@@ -363,6 +399,7 @@ Important AA artifacts:
 - `snapshots/meetings-2026-05-24T100627Z.json`: refreshed export after clearing credential warning noise.
 - `snapshots/meetings-2026-05-24T103541Z.json` and `snapshots/latest.json`: refreshed export after clearing listed contact warning noise, with `aa=94394`, `ca=2341`, and `na=2681`.
 - `snapshots/meetings-2026-05-24T105140Z.json` and `snapshots/latest.json`: refreshed export after clearing all open AA missing-timezone warnings, with `aa=94394`, `ca=2341`, and `na=2681`.
+- `snapshots/meetings-2026-05-24T111614Z.json` and `snapshots/latest.json`: refreshed export after reducing AA low-confidence warnings, with `aa=95471`, `ca=2341`, and `na=2681`.
 
 ## Interfaces and Dependencies
 
@@ -379,3 +416,5 @@ Plan revision note: Updated on 2026-05-24 after removing listed online meeting c
 Plan revision note: Updated on 2026-05-24 after removing listed meeting contact warnings and exporting `snapshots/meetings-2026-05-24T103541Z.json`.
 
 Plan revision note: Updated on 2026-05-24 after clearing all open AA missing-timezone warnings and exporting `snapshots/meetings-2026-05-24T105140Z.json`.
+
+Plan revision note: Updated on 2026-05-24 after reducing AA low-confidence warnings to 219 and exporting `snapshots/meetings-2026-05-24T111614Z.json`.

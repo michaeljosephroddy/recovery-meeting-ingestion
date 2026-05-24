@@ -1184,7 +1184,93 @@ def _merge_time_line_remainder(payload: dict[str, Any], line: str, time: str) ->
     if _looks_like_format_text(remainder):
         payload["formats"] = remainder
         return
+    if _merge_inline_named_detail(payload, remainder):
+        return
     _merge_day_section_line(payload, remainder)
+
+
+def _merge_inline_named_detail(payload: dict[str, Any], line: str) -> bool:
+    if payload.get("name"):
+        return False
+    cleaned = _clean_inline_named_detail(line)
+    if not cleaned:
+        return False
+
+    connection_split = _split_before_connection_marker(cleaned)
+    if connection_split is not None:
+        name, detail = connection_split
+        if _set_inline_name(payload, name):
+            _merge_day_section_line(payload, detail)
+            return True
+
+    address_match = ADDRESS_RE.search(cleaned)
+    if address_match and address_match.start() > 0:
+        name = _clean_meeting_name_line(cleaned[: address_match.start()])
+        if _set_inline_name(payload, name):
+            _merge_day_section_line(payload, cleaned[address_match.start() :])
+            return True
+
+    comma_split = re.split(r"\s+[,|]\s+", cleaned, maxsplit=1)
+    if len(comma_split) == 2 and _set_inline_name(payload, comma_split[0]):
+        _merge_inline_location_detail(payload, comma_split[1])
+        return True
+
+    return False
+
+
+def _clean_inline_named_detail(line: str) -> str:
+    cleaned = _clean_fragment(line)
+    cleaned = _clean_fragment(TIME_RE.sub("", cleaned, count=1))
+    cleaned = re.sub(r"^(?:uhr|at)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"^(?:pacific|eastern|central|mountain)(?:\s*\([^)]*\))?\s*:\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"^\s*[:;,]+\s*", "", cleaned)
+    return _clean_fragment(cleaned)
+
+
+def _merge_inline_location_detail(payload: dict[str, Any], detail: str) -> None:
+    if "|" not in detail:
+        _merge_day_section_line(payload, detail)
+        return
+    location, extra = (_clean_fragment(part).strip(", ") for part in detail.split("|", 1))
+    if location:
+        _merge_day_section_line(payload, location)
+    if extra:
+        _merge_day_section_line(payload, extra)
+
+
+def _split_before_connection_marker(line: str) -> tuple[str, str] | None:
+    match = re.search(
+        r"\b(?:zoom|telephone|phone|tel\.?|meeting\s+id|join\s+(?:zoom\s+)?meeting)\b",
+        line,
+        flags=re.IGNORECASE,
+    )
+    if match is None or match.start() <= 0:
+        return None
+    return line[: match.start()], line[match.start() :]
+
+
+def _set_inline_name(payload: dict[str, Any], name: str) -> bool:
+    cleaned = _clean_meeting_name_line(name)
+    if not cleaned or not _looks_like_inline_meeting_name(cleaned):
+        return False
+    payload["name"] = cleaned
+    return True
+
+
+def _looks_like_inline_meeting_name(name: str) -> bool:
+    lowered = name.lower()
+    if lowered in {"name", "name:", "buscar", "buscar:"}:
+        return False
+    if not any(char.isalpha() for char in name):
+        return False
+    if TIME_RE.search(name) or DAY_RE.search(name):
+        return False
+    return len(name) <= 120
 
 
 def _merge_day_section_line(payload: dict[str, Any], line: str) -> None:

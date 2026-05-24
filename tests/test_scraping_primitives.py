@@ -285,6 +285,53 @@ def test_extract_meetings_from_wordpress_day_sections() -> None:
     assert meetings[1].payload["phone_join_info"] == "ONLINE Zoom Meeting Meeting ID: 852 9758 1348"
 
 
+def test_extract_day_section_splits_inline_online_meeting_name() -> None:
+    html = """
+    <article>
+      <div class="entry-content">
+        <h3>Monday</h3>
+        <p>7:00 AM Pacific: Wake Up Group Meeting ID: 970 0504 0229 Join Zoom Meeting: https://us06web.zoom.us/j/97005040229</p>
+      </div>
+    </article>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/online-meetings",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].payload["name"] == "Wake Up Group"
+    assert "Meeting ID: 970 0504 0229" in meetings[0].payload["phone_join_info"]
+    assert meetings[0].payload["online_url"] == "https://us06web.zoom.us/j/97005040229"
+    assert meetings[0].confidence >= 0.75
+
+
+def test_extract_day_section_splits_inline_location_meeting_name() -> None:
+    html = """
+    <article>
+      <div class="entry-content">
+        <h3>Sunday</h3>
+        <p>8:00 AM : Westside AA , Sioux Falls, SD, 57104 | Big Book</p>
+        <p>9am A Daily Reprieve (LT) 723 Slocum St. Lancaster</p>
+      </div>
+    </article>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/meeting-times",
+    )
+
+    assert [meeting.payload["name"] for meeting in meetings] == [
+        "Westside AA",
+        "A Daily Reprieve (LT)",
+    ]
+    assert meetings[0].payload["address_line1"] == "Sioux Falls, SD, 57104"
+    assert meetings[1].payload["address_line1"] == "723 Slocum St. Lancaster"
+    assert all(meeting.confidence >= 0.75 for meeting in meetings)
+
+
 def test_extract_meetings_from_accordion_day_panels() -> None:
     html = """
     <div class="panel">
