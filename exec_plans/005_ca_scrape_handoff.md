@@ -496,3 +496,19 @@ Snapshot:
 - Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
 - Output: `snapshots/meetings-2026-05-24T124540Z.json` and `snapshots/latest.json`.
 - Snapshot DB row: `d5364757-695d-4bb1-8e3b-5075d7c389ba`, `101,605` meetings, `0` blocked by review.
+
+## 2026-05-24 Contact And Credential Warning Cleanup
+
+The CA contact and credential warning queues were stale under the current review policy. Current review flag generation preserves listed meeting contacts, Zoom IDs, access codes, and passcodes as meeting data rather than review noise.
+
+Cleanup:
+
+- `possible_personal_contact`: `441` resolved.
+- `possible_private_online_credential`: `389` resolved.
+- Remaining CA open warnings: `scrape_low_confidence=155`.
+
+Snapshot:
+
+- Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
+- Output: `snapshots/meetings-2026-05-24T125344Z.json` and `snapshots/latest.json`.
+- Snapshot DB row: `853f40df-db42-4279-88cd-603d060a6332`, `101,605` meetings, `0` blocked by review.
