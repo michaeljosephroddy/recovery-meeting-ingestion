@@ -1140,6 +1140,25 @@ def test_extract_meetings_from_inline_landing_page_schedule() -> None:
     assert meetings[0].payload["address_line1"] == "Holtegata 15, 0259 Oslo"
     assert meetings[2].payload["address_line1"] == "Rosenborggata 3, 0356 Oslo"
     assert meetings[3].payload["online_url"] == "https://us06web.zoom.us/j/85603686376#success"
+    assert {meeting.method for meeting in meetings} == {"heuristic_inline_schedule"}
+    assert all(meeting.confidence >= 0.75 for meeting in meetings)
+
+
+def test_day_section_rejects_time_range_fragments_as_locations() -> None:
+    html = """
+    <main>
+      <p>Tuesday 7:00pm to 8:30pm</p>
+      <p>Wednesday 7:00pm 7 : - 8:30pm</p>
+      <p>Friday 8-9 PM</p>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/meetings",
+    )
+
+    assert meetings == []
 
 
 def test_text_fallback_rejects_generic_app_store_page_text() -> None:

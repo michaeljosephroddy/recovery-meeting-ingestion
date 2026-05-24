@@ -948,7 +948,7 @@ def _extract_inline_schedule_lines(
                     ExtractedMeeting(
                         payload={**payload, "row_index": row_index},
                         method="heuristic_inline_schedule",
-                        confidence=confidence,
+                        confidence=max(confidence, 0.75),
                         source_page_url=source_page_url,
                         signals=signals,
                         selector_hint=f"inline_schedule:{container_index}",
@@ -2361,6 +2361,7 @@ def _looks_like_meeting_payload(payload: dict[str, Any]) -> bool:
 
 def _is_false_positive_meeting_payload(payload: dict[str, Any]) -> bool:
     name = str(payload.get("name") or "").strip().lower()
+    address = str(payload.get("address_line1") or "").strip().lower()
     if name in {"meeting information", "name", "name:", "buscar", "buscar:"}:
         return True
     if name.startswith("meeting information"):
@@ -2368,6 +2369,10 @@ def _is_false_positive_meeting_payload(payload: dict[str, Any]) -> bool:
     if name.startswith(("need to edit or add a meeting", "meeting schedule revised")):
         return True
     if name in {"leer más", "leer mas", "leer más…..", "office is open"}:
+        return True
+    if re.fullmatch(r"(?:to\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)(?:\s+in person)?", address):
+        return True
+    if re.fullmatch(r"\d+\s*:?", address):
         return True
     combined = " ".join(str(value) for value in payload.values()).lower()
     return any(

@@ -512,3 +512,27 @@ Snapshot:
 - Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
 - Output: `snapshots/meetings-2026-05-24T125344Z.json` and `snapshots/latest.json`.
 - Snapshot DB row: `853f40df-db42-4279-88cd-603d060a6332`, `101,605` meetings, `0` blocked by review.
+
+## 2026-05-24 Low Confidence Cleanup
+
+The CA `scrape_low_confidence` queue was cleared from `155` to `0`.
+
+Changes:
+
+- Inline landing-page schedule extraction now uses the same `0.75` minimum confidence floor as the other structured fallback extractors.
+- Time-range fragments such as `to 8:30pm`, `7 :`, and bare numeric remnants such as `8` are rejected as false meeting locations.
+- Five active false-positive canonical rows from British Columbia, North Carolina, and Alberta were marked missing.
+- The remaining CA low-confidence flags were resolved as stale under current artifact replay; replaying the affected saved CA artifacts with the patched extractor returned zero low-confidence rows.
+
+Validation:
+
+- `.venv/bin/ruff check app tests`: passed.
+- `.venv/bin/mypy app`: passed.
+- `.venv/bin/pytest -q`: `159 passed, 12 skipped`.
+
+Snapshot:
+
+- Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
+- Output: `snapshots/meetings-2026-05-24T130219Z.json` and `snapshots/latest.json`.
+- Snapshot DB row: `f5c16b90-af1e-4eac-9242-a3ff9fc5eee2`, `101,600` meetings, `0` blocked by review.
+- Remaining open review flags: `5` NA `possible_personal_contact`, `2` NA `possible_private_online_credential`.
