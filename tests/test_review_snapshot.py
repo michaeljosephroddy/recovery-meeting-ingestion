@@ -3,7 +3,7 @@ from app.normalize.canonical import CanonicalMeetingCandidate, MeetingOccurrence
 from app.review.flags import flag_source_drop, flags_for_candidate
 
 
-def test_review_flags_sensitive_contact_and_missing_timezone() -> None:
+def test_review_flags_allow_listed_contact_info_and_flag_missing_timezone() -> None:
     candidate = CanonicalMeetingCandidate(
         fellowship="aa",
         source_id="aa-online",
@@ -17,11 +17,12 @@ def test_review_flags_sensitive_contact_and_missing_timezone() -> None:
     )
 
     codes = {flag.code for flag in flags_for_candidate(candidate)}
-    assert "possible_personal_contact" in codes
+    assert "possible_personal_contact" not in codes
+    assert "possible_private_online_credential" not in codes
     assert "missing_timezone" in codes
 
 
-def test_review_flags_do_not_treat_meeting_credentials_as_review_noise() -> None:
+def test_review_flags_do_not_treat_meeting_contact_or_credentials_as_review_noise() -> None:
     candidate = CanonicalMeetingCandidate(
         fellowship="ca",
         source_id="ca-online",
@@ -29,7 +30,10 @@ def test_review_flags_do_not_treat_meeting_credentials_as_review_noise() -> None
         source_url="https://example.org/meetings",
         name="Online Meeting",
         meeting_type="online",
-        phone_join_info="Zoom: Meeting ID: 263 748 3832 Haslo: Nadzieja",
+        phone_join_info=(
+            "Zoom: Meeting ID: 263 748 3832 Haslo: Nadzieja "
+            "Contact group@example.org or 555-123-4567"
+        ),
         occurrences=[
             MeetingOccurrence(day_of_week=1, start_time_local="08:00", timezone="Europe/Warsaw")
         ],
@@ -40,7 +44,7 @@ def test_review_flags_do_not_treat_meeting_credentials_as_review_noise() -> None
     assert "possible_personal_contact" not in codes
 
 
-def test_review_flags_do_not_treat_zoom_url_as_personal_phone() -> None:
+def test_review_flags_allow_zoom_url() -> None:
     candidate = CanonicalMeetingCandidate(
         fellowship="aa",
         source_id="aa-online",

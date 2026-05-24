@@ -31,6 +31,7 @@ The work is operational and iterative. AA source discovery already exists in `ap
 - [x] (2026-05-24T10:49+01:00) Ran focused validation after the concurrency and failed-scrape persistence changes: `.venv/bin/ruff check app tests`, `.venv/bin/pytest tests/test_cli.py -q`, and `.venv/bin/mypy app` all passed.
 - [x] (2026-05-24T10:56+01:00) Cleared the largest AA missing-timezone warning cluster. Canadian province abbreviation support and address-based Canada/province inference now let the Montreal Spanish intergroup TSML rows infer timezones from addresses such as `Saint-Jérôme, QC, Canada`. Reimporting `scrape_artifacts/aa-full-resume-20260524T093353Z/aa-fd84ea48efda/summary.json` reduced that source from 2,540 open warnings to 763 and reduced AA open warnings from 37,658 to 35,881. A refreshed snapshot was exported at `snapshots/meetings-2026-05-24T095621Z.json` with `blocked_by_review=0`.
 - [x] (2026-05-24T11:06+01:00) Removed review noise for listed online meeting credentials. Published Zoom URLs, meeting IDs, passcodes, and passwords remain in meeting fields but no longer create `possible_private_online_credential` warnings or get misread as personal phone numbers. Reimported 203 artifact-backed AA sources and resolved stale credential/contact warnings that no longer match the updated rule. AA open warnings fell from 35,881 to 10,375, with `possible_private_online_credential=0`. A refreshed snapshot was exported at `snapshots/meetings-2026-05-24T100627Z.json` with `blocked_by_review=0`.
+- [x] (2026-05-24T11:35+01:00) Removed review noise for all contact information listed on meeting records. Published group phone numbers, emails, Zoom URLs, meeting IDs, passwords, and passcodes are treated as meeting access data and remain in the export without contact/credential warnings. Resolved 8,669 remaining open AA `possible_personal_contact` warnings. AA open warnings now consist only of `missing_timezone=1038` and `scrape_low_confidence=668`. A refreshed snapshot was exported at `snapshots/meetings-2026-05-24T103541Z.json` with `blocked_by_review=0`.
 
 ## Surprises & Discoveries
 
@@ -68,6 +69,8 @@ The work is operational and iterative. AA source discovery already exists in `ap
     Evidence: After address-based Canada/province inference, `aa-fd84ea48efda` occurrences used `America/Toronto` for 1,765 rows, `America/Moncton` for 11 New Brunswick rows, and `America/Iqaluit` for one Iqaluit row. The source no longer has open `missing_timezone` warnings.
 - Observation: Online meeting credentials are expected meeting access data, not private leakage.
     Evidence: Samples from New York, Australia, and Seattle showed `possible_private_online_credential` warnings were ordinary listed Zoom meeting IDs, passcodes, passwords, and Zoom URLs. After removing the credential warning rule and excluding `online_url` from the personal-contact scan, AA `possible_private_online_credential` warnings dropped to 0 while exported meeting access fields were preserved.
+- Observation: Listed contact details are also expected meeting access/help data.
+    Evidence: Remaining `possible_personal_contact` samples were published group contact phone numbers or emails on meeting listings. The user confirmed that all contact and credentials listed on a meeting are needed. After resolving those warnings, AA open warning classes are limited to missing timezone and low scrape confidence.
 
 ## Decision Log
 
@@ -113,12 +116,15 @@ The work is operational and iterative. AA source discovery already exists in `ap
 - Decision: Stop warning on listed online meeting credentials.
     Rationale: Meeting IDs, passcodes, passwords, and Zoom URLs are necessary access information when they are published by the source listing. Keeping them in the normalized meeting data is correct, and warning on every occurrence made the review queue noisy without improving safety.
     Date/Author: 2026-05-24 / Codex.
+- Decision: Stop warning on contact information listed on meeting records.
+    Rationale: Published group phone numbers and emails are meeting access/help information for the app, just like online meeting credentials. The review layer should not block or warn on data that is expected to be shown to users.
+    Date/Author: 2026-05-24 / Codex.
 
 ## Outcomes & Retrospective
 
 The controlled AA scrape proved the browser path can ingest AA meetings at meaningful scale: AA canonical meetings increased from 114 to more than 3,000 after controlled source reruns and the first part of the full pass. The main remaining risk is not browser availability, but hidden/search-backed local meeting directories. The current code now targets AA search/list route names and form patterns directly, but Wix-style meeting pages may still need a dedicated data extractor in a later pass.
 
-The full AA pass has now completed and produced a publishable snapshot. `snapshots/latest.json` contains 94,394 AA meetings, up from the baseline of 114, with 99,416 active meetings total across AA, CA, and NA. The snapshot is not blocked by open error flags. The largest missing-timezone cluster has been cleared, and listed online meeting credentials no longer create warnings. The main remaining quality work is deciding whether explicit published group contact phone numbers and emails should remain warning-worthy.
+The full AA pass has now completed and produced a publishable snapshot. `snapshots/latest.json` contains 94,394 AA meetings, up from the baseline of 114, with 99,416 active meetings total across AA, CA, and NA. The snapshot is not blocked by open error flags. The largest missing-timezone cluster has been cleared, and listed meeting contact details and online meeting credentials no longer create warnings. The main remaining quality work is resolving the remaining missing timezone and low scrape confidence warnings.
 
 ## Context and Orientation
 
@@ -270,6 +276,22 @@ Credential warning cleanup transcript excerpts:
     blocked_by_review: 0
     output: snapshots/meetings-2026-05-24T100627Z.json
 
+Contact warning cleanup transcript excerpts:
+
+    UPDATE review_flags ... code IN ('possible_personal_contact','possible_private_online_credential')
+    UPDATE 8669
+
+    AA open warnings after cleanup:
+    missing_timezone=1038
+    scrape_low_confidence=668
+    possible_personal_contact=0
+    possible_private_online_credential=0
+
+    .venv/bin/python -m app.cli export-snapshot --no-dry-run
+    active_meetings: 99416
+    blocked_by_review: 0
+    output: snapshots/meetings-2026-05-24T103541Z.json
+
 ## Validation and Acceptance
 
 The AA pass is successful when all of the following are true:
@@ -309,7 +331,8 @@ Important AA artifacts:
 - `scrape_artifacts/aa-full-resume-20260524T093353Z`: concurrency-8 final resume from offset 514. It completed 164/164, with 147 succeeded, 17 failed, 13,884 normalized candidates, and 9,317 review flags.
 - `snapshots/meetings-2026-05-24T094908Z.json`: first final AA export after clearing open error flags.
 - `snapshots/meetings-2026-05-24T095621Z.json`: refreshed export after clearing the Montreal missing-timezone cluster.
-- `snapshots/meetings-2026-05-24T100627Z.json` and `snapshots/latest.json`: refreshed export after clearing credential warning noise, with `aa=94394`, `ca=2341`, and `na=2681`.
+- `snapshots/meetings-2026-05-24T100627Z.json`: refreshed export after clearing credential warning noise.
+- `snapshots/meetings-2026-05-24T103541Z.json` and `snapshots/latest.json`: refreshed export after clearing listed contact warning noise, with `aa=94394`, `ca=2341`, and `na=2681`.
 
 ## Interfaces and Dependencies
 
@@ -322,3 +345,5 @@ Plan revision note: Updated on 2026-05-24 after completing the AA full scrape/im
 Plan revision note: Updated on 2026-05-24 after clearing the largest AA missing-timezone cluster and exporting `snapshots/meetings-2026-05-24T095621Z.json`.
 
 Plan revision note: Updated on 2026-05-24 after removing listed online meeting credential warnings and exporting `snapshots/meetings-2026-05-24T100627Z.json`.
+
+Plan revision note: Updated on 2026-05-24 after removing listed meeting contact warnings and exporting `snapshots/meetings-2026-05-24T103541Z.json`.
