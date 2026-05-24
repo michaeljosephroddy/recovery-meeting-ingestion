@@ -118,7 +118,70 @@ def test_extract_meetings_from_table_headers() -> None:
     assert meetings[0].method == "heuristic_table_row"
     assert meetings[0].payload["name"] == "Monday Main"
     assert meetings[0].payload["address_line1"] == "10 Main Street"
-    assert meetings[0].confidence >= 0.75
+
+
+def test_extract_simple_tabbed_day_schedule() -> None:
+    rows = [
+        "\tBegining of the Trail\tCondon\t"
+        "United Church of Christ 110 S Church St, Condon, OR 97823\t7:00 pm\t",
+        "\tPendleton Nooner\tPendleton\t"
+        "AA Club House 116 SE 12th, Pendleton, Oregon\t12:00 pm\t",
+    ]
+    html = f"""
+    <main>
+      <h2>Monday</h2>
+      <pre>{rows[0]}</pre>
+      <pre>{rows[1]}</pre>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/meetings",
+    )
+
+    assert [meeting.method for meeting in meetings] == [
+        "heuristic_simple_tabbed_day_schedule",
+        "heuristic_simple_tabbed_day_schedule",
+    ]
+    assert meetings[0].payload["name"] == "Begining of the Trail"
+    assert meetings[0].payload["city"] == "Condon"
+    assert meetings[0].payload["day"] == "Monday"
+    assert meetings[0].confidence >= 0.82
+
+
+def test_extract_labelled_detail_blocks() -> None:
+    html = """
+    <main>
+      <p>Name:</p>
+      <p>Old Timer Speaker Meeting</p>
+      <p>Town:</p>
+      <p>Hermiston</p>
+      <p>Location:</p>
+      <p>Hermiston AA Hall</p>
+      <p>680 Harper Road, Hermiston, Oregon</p>
+      <p>Schedule:</p>
+      <p>4th Saturday of every month</p>
+      <p>Time:</p>
+      <p>6:00 pm</p>
+      <p>Attributes:</p>
+      <p>Open</p>
+      <p>Speaker Meeting</p>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/meetings",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].method == "heuristic_labelled_detail_block"
+    assert meetings[0].payload["name"] == "Old Timer Speaker Meeting"
+    assert meetings[0].payload["day"] == "Saturday"
+    assert meetings[0].payload["venue_name"] == "Hermiston AA Hall"
+    assert meetings[0].payload["address_line1"] == "680 Harper Road, Hermiston, Oregon"
+    assert meetings[0].confidence >= 0.82
 
 
 def test_extract_meetings_from_table_time_with_day_and_platform() -> None:

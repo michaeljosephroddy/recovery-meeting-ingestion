@@ -419,6 +419,7 @@ Important AA artifacts:
 - `snapshots/meetings-2026-05-24T103541Z.json` and `snapshots/latest.json`: refreshed export after clearing listed contact warning noise, with `aa=94394`, `ca=2341`, and `na=2681`.
 - `snapshots/meetings-2026-05-24T105140Z.json` and `snapshots/latest.json`: refreshed export after clearing all open AA missing-timezone warnings, with `aa=94394`, `ca=2341`, and `na=2681`.
 - `snapshots/meetings-2026-05-24T111614Z.json` and `snapshots/latest.json`: refreshed export after reducing AA low-confidence warnings, with `aa=95471`, `ca=2341`, and `na=2681`.
+- `snapshots/meetings-2026-05-24T123511Z.json` and `snapshots/latest.json`: refreshed export after clearing all open AA low-confidence warnings, with `aa=96583`, `ca=2341`, and `na=2681`.
 
 ## Interfaces and Dependencies
 
@@ -437,3 +438,5 @@ Plan revision note: Updated on 2026-05-24 after removing listed meeting contact 
 Plan revision note: Updated on 2026-05-24 after clearing all open AA missing-timezone warnings and exporting `snapshots/meetings-2026-05-24T105140Z.json`.
 
 Plan revision note: Updated on 2026-05-24 after reducing AA low-confidence warnings to 219 and exporting `snapshots/meetings-2026-05-24T111614Z.json`.
+
+Plan revision note: Updated on 2026-05-24 after replaying saved AA artifacts through improved tabbed/labelled/detail extraction, persisting safe zero-warning re-extractions, resolving eight stale false-positive warning rows, and exporting `snapshots/meetings-2026-05-24T123511Z.json`.

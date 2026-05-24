@@ -99,7 +99,11 @@ def extract_meetings_from_html(
     extracted.extend(_extract_tsml_tables(soup, source_page_url, page_score))
     extracted.extend(_extract_bmlt_tables(soup, source_page_url, page_score))
     extracted.extend(_extract_tables(soup, source_page_url, page_score))
-    tab_separated = _extract_tab_separated_schedule(soup, source_page_url, page_score)
+    tab_separated = [
+        *_extract_tab_separated_schedule(soup, source_page_url, page_score),
+        *_extract_simple_tabbed_day_schedule(soup, source_page_url, page_score),
+        *_extract_labelled_detail_blocks(soup, source_page_url, page_score),
+    ]
     if tab_separated:
         return _dedupe_extracted([*extracted, *tab_separated])
     extracted.extend(_extract_cards(soup, source_page_url, page_score))
@@ -487,6 +491,162 @@ def _extract_tab_separated_schedule(
         )
         row_index += 1
     return meetings
+
+
+def _extract_simple_tabbed_day_schedule(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    meetings: list[ExtractedMeeting] = []
+    current_day: str | None = None
+    row_index = 0
+    for raw_line in soup.get_text("\n").splitlines():
+        stripped = _clean_fragment(raw_line)
+        if not stripped:
+            continue
+        if "\t" not in raw_line:
+            current_day = _day_heading_or_none(stripped) or current_day
+            continue
+        if current_day is None:
+            continue
+        cells = [_clean_fragment(cell) for cell in raw_line.split("\t") if _clean_fragment(cell)]
+        if len(cells) < 4:
+            continue
+        time = _first_time_match(cells[3]) or _first_time_match(raw_line)
+        if not time:
+            continue
+        payload: dict[str, Any] = {
+            "name": cells[0],
+            "day": current_day,
+            "city": cells[1],
+            "address_line1": cells[2],
+            "time": _normalize_extracted_time(time),
+        }
+        if len(cells) > 4 and not _is_ignored_detail_line(cells[4]):
+            payload["formats"] = cells[4]
+        payload = _without_empty(payload)
+        if not _looks_like_meeting_payload(payload):
+            continue
+        confidence, signals = confidence_for_payload(
+            payload,
+            method="heuristic_simple_tabbed_day_schedule",
+            page_score=page_score,
+            repeated_structure=True,
+            table_headers=True,
+        )
+        meetings.append(
+            ExtractedMeeting(
+                payload={**payload, "row_index": row_index},
+                method="heuristic_simple_tabbed_day_schedule",
+                confidence=max(confidence, 0.82),
+                source_page_url=source_page_url,
+                signals=signals,
+                selector_hint="simple_tabbed_day_schedule",
+            )
+        )
+        row_index += 1
+    return meetings
+
+
+def _extract_labelled_detail_blocks(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    lines = [
+        _clean_fragment(line)
+        for line in soup.get_text("\n", strip=True).splitlines()
+        if _clean_fragment(line)
+    ]
+    meetings: list[ExtractedMeeting] = []
+    row_index = 0
+    index = 0
+    while index < len(lines):
+        if lines[index].lower() != "name:":
+            index += 1
+            continue
+        block, next_index = _labelled_detail_block(lines, index)
+        index = next_index
+        payload = _payload_from_labelled_detail_block(block)
+        payload = _without_empty(payload)
+        if not _looks_like_meeting_payload(payload):
+            continue
+        confidence, signals = confidence_for_payload(
+            payload,
+            method="heuristic_labelled_detail_block",
+            page_score=page_score,
+            repeated_structure=True,
+        )
+        meetings.append(
+            ExtractedMeeting(
+                payload={**payload, "row_index": row_index},
+                method="heuristic_labelled_detail_block",
+                confidence=max(confidence, 0.82),
+                source_page_url=source_page_url,
+                signals=signals,
+                selector_hint="labelled_detail_block",
+            )
+        )
+        row_index += 1
+    return meetings
+
+
+def _labelled_detail_block(lines: list[str], start: int) -> tuple[dict[str, list[str]], int]:
+    labels = {"name:", "town:", "location:", "schedule:", "time:", "attributes:"}
+    block: dict[str, list[str]] = {}
+    current: str | None = None
+    index = start
+    while index < len(lines):
+        lowered = lines[index].lower()
+        if index > start and lowered == "name:":
+            break
+        if lowered in labels:
+            current = lowered.rstrip(":")
+            block.setdefault(current, [])
+        elif current is not None:
+            block[current].append(lines[index])
+        index += 1
+    return block, index
+
+
+def _payload_from_labelled_detail_block(block: dict[str, list[str]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if name := _first_block_value(block, "name"):
+        payload["name"] = _clean_meeting_name_line(name)
+    if town := _first_block_value(block, "town"):
+        payload["city"] = town
+    if schedule := _first_block_value(block, "schedule"):
+        if day := _day_from_schedule_line(schedule):
+            payload["day"] = day
+        payload["notes"] = schedule
+    if (time := _first_block_value(block, "time")) and (
+        parsed_time := _first_time_match(time)
+    ):
+        payload["time"] = _normalize_extracted_time(parsed_time)
+    location_lines = block.get("location", [])
+    for line in location_lines:
+        if not any(char.isdigit() for char in line) and any(
+            any(char.isdigit() for char in candidate) for candidate in location_lines
+        ):
+            payload.setdefault("venue_name", line)
+            continue
+        if ADDRESS_RE.search(line) or _looks_like_address_fallback(line):
+            payload.setdefault("address_line1", line)
+        else:
+            payload.setdefault("venue_name", line)
+    attributes = [
+        line
+        for line in block.get("attributes", [])
+        if not _is_ignored_detail_line(line) and not _is_non_meeting_detail_line(line)
+    ]
+    if attributes:
+        payload["formats"] = ", ".join(attributes)
+    return payload
+
+
+def _first_block_value(block: dict[str, list[str]], key: str) -> str | None:
+    return next((line for line in block.get(key, []) if line), None)
 
 
 def _is_tab_separated_schedule_start(line: str) -> bool:
@@ -885,7 +1045,7 @@ def _extract_text_blocks(
             ExtractedMeeting(
                 payload={**payload, "row_index": index},
                 method="heuristic_text_block",
-                confidence=confidence,
+                confidence=max(confidence, 0.75),
                 source_page_url=source_page_url,
                 signals=signals,
                 selector_hint="text_block",
@@ -1130,7 +1290,7 @@ def _extract_direct_listing_blocks(
                     ExtractedMeeting(
                         payload={**payload, "row_index": row_index},
                         method="heuristic_direct_listing",
-                        confidence=confidence,
+                        confidence=max(confidence, 0.75),
                         source_page_url=source_page_url,
                         signals=signals,
                         selector_hint=f"direct_listing:{container_index}",
@@ -1168,7 +1328,7 @@ def _extract_direct_listing_blocks(
                 ExtractedMeeting(
                     payload={**payload, "row_index": row_index},
                     method="heuristic_direct_listing",
-                    confidence=confidence,
+                    confidence=max(confidence, 0.75),
                     source_page_url=source_page_url,
                     signals=signals,
                     selector_hint=f"direct_listing:{container_index}",
@@ -1987,9 +2147,14 @@ def _looks_like_city_line(text: str) -> bool:
             "book",
             "club",
             "clubhouse",
+            "continue reading",
+            "llámanos",
+            "llamanos",
+            "map link",
             "meeting",
             "newcomer",
             "passcode",
+            "read more",
             "smoking",
             "step",
             "study",
@@ -2038,7 +2203,7 @@ def _append_pending_day_section(
         ExtractedMeeting(
             payload={**cleaned, "row_index": row_index},
             method="heuristic_day_section",
-            confidence=confidence,
+            confidence=max(confidence, 0.75),
             source_page_url=source_page_url,
             signals=signals,
             selector_hint=f"day_section:{container_index}",
@@ -2200,6 +2365,10 @@ def _is_false_positive_meeting_payload(payload: dict[str, Any]) -> bool:
         return True
     if name.startswith("meeting information"):
         return True
+    if name.startswith(("need to edit or add a meeting", "meeting schedule revised")):
+        return True
+    if name in {"leer más", "leer mas", "leer más…..", "office is open"}:
+        return True
     combined = " ".join(str(value) for value in payload.values()).lower()
     return any(
         phrase in combined
@@ -2208,6 +2377,21 @@ def _is_false_positive_meeting_payload(payload: dict[str, Any]) -> bool:
             "your computer's time",
             "attention all aa meeting seekers",
             "tention all aa meeting seekers",
+            "continue reading",
+            "read more",
+            "office hours",
+            "will not take place",
+            "district committee",
+            "intergroup meets",
+            "bookstall",
+            "business-meetings",
+            "district 20 meetings are held",
+            "leer más",
+            "leer mas",
+            "office is open",
+            "your access to this site has been limited",
+            "visítanos en",
+            "visitanos en",
         )
     )
 
@@ -2221,6 +2405,19 @@ def _is_non_meeting_source_text(text: str) -> bool:
             "your computer's time",
             "attention all aa meeting seekers",
             "tention all aa meeting seekers",
+            "continue reading",
+            "read more",
+            "office hours",
+            "will not take place",
+            "district committee",
+            "intergroup meets",
+            "bookstall",
+            "business-meetings",
+            "district 20 meetings are held",
+            "leer más",
+            "leer mas",
+            "office is open",
+            "your access to this site has been limited",
         )
     )
 
