@@ -9,6 +9,7 @@ from app.adapters.html_config import configured_selectors, extract_records_from_
 from app.normalize.canonical import CanonicalMeetingCandidate, MeetingOccurrence
 from app.normalize.schedule import normalize_days, parse_time
 from app.sources.registry import (
+    AUSTRALIA_REGION_TIMEZONES,
     COUNTRY_TIMEZONES,
     US_REGION_TIMEZONES,
     Source,
@@ -102,6 +103,11 @@ MEXICO_REGION_ABBREVIATIONS = {
     "SIN": "Sinaloa",
     "SON": "Sonora",
 }
+AUSTRALIA_REGION_ABBREVIATIONS = {
+    key.upper(): key
+    for key in AUSTRALIA_REGION_TIMEZONES
+    if len(key) <= 3
+}
 
 
 class StaticHtmlAdapter:
@@ -149,8 +155,11 @@ class StaticHtmlAdapter:
         days = normalize_days(_string(payload.get("day")))
         start = parse_time(_string(payload.get("time")))
         address_line1 = _string(payload.get("address_line1") or payload.get("address"))
-        inferred_country, inferred_region = _country_region_from_address(address_line1)
         country = _string(payload.get("country")) or self.source.country
+        inferred_country, inferred_region = _country_region_from_address(
+            address_line1,
+            country_hint=country,
+        )
         region = _string(payload.get("region")) or self.source.region
         payload_timezone = _string(payload.get("timezone"))
         timezone = (
@@ -222,16 +231,26 @@ def _source_record_id(payload: dict[str, Any]) -> str:
     return hashlib.sha1(basis.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
-def _country_region_from_address(address: str | None) -> tuple[str | None, str | None]:
+def _country_region_from_address(
+    address: str | None,
+    *,
+    country_hint: str | None = None,
+) -> tuple[str | None, str | None]:
     if not address:
         return None, None
     parts = [part.strip() for part in address.replace("\n", ",").split(",")]
     country = _country_from_address_parts(parts)
+    effective_country = (country or country_hint or "").casefold()
     for part in parts:
         tokens = [token.strip(" .").upper() for token in part.split()]
         for token in tokens:
-            if country == "United States" and token in US_REGION_ABBREVIATIONS:
+            if (
+                effective_country in {"united states", "us", "usa"}
+                and token in US_REGION_ABBREVIATIONS
+            ):
                 return country or "United States", US_REGION_ABBREVIATIONS[token]
+            if effective_country == "australia" and token in AUSTRALIA_REGION_ABBREVIATIONS:
+                return country or "Australia", AUSTRALIA_REGION_ABBREVIATIONS[token]
             if token in CANADA_REGION_ABBREVIATIONS:
                 return country or "Canada", token
             if token in MEXICO_REGION_ABBREVIATIONS:

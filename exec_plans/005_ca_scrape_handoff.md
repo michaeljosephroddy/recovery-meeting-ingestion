@@ -473,3 +473,26 @@ Final snapshot:
 - Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
 - Output: `snapshots/meetings-2026-05-23T220707Z.json` and `snapshots/latest.json`.
 - Snapshot DB row: `de3e6f4b-4d52-4762-812c-287a67283559`, `5,136` meetings, `0` blocked by review.
+
+## 2026-05-24 Missing Timezone Cleanup
+
+The CA `missing_timezone` warning queue was cleared from `148` to `0`.
+
+Changes:
+
+- Static HTML normalization now uses source country as a hint when extracting state abbreviations from addresses, so rows such as `Cleveland, OH` under a United States source and `Bondi, NSW` under an Australia source infer the correct timezone.
+- Added source-text timezone hints for recurring CA local domains: Cleveland/Akron Ohio, Washington, Orange County California, Pennsylvania, Tennessee, Australia, and Jakarta.
+- Added country timezone aliases for `Indonesia` and the existing CA world-listing typo `Argentia`.
+- Updated stored source metadata and occurrence timezones for the 11 affected CA sources, using source-local timezones and `Europe/London` for the currently rendered CA Online listing rows.
+
+Validation:
+
+- `.venv/bin/ruff check app tests`: passed.
+- `.venv/bin/mypy app`: passed.
+- `.venv/bin/pytest -q`: `158 passed, 12 skipped`.
+
+Snapshot:
+
+- Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
+- Output: `snapshots/meetings-2026-05-24T124540Z.json` and `snapshots/latest.json`.
+- Snapshot DB row: `d5364757-695d-4bb1-8e3b-5075d7c389ba`, `101,605` meetings, `0` blocked by review.

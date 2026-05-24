@@ -96,6 +96,12 @@ def test_timezone_for_country_region_handles_city_hint_without_country() -> None
 
 def test_timezone_for_source_text_handles_clear_single_region_sources() -> None:
     assert timezone_for_source_text("Cyprus Intergroup", "https://example.org") == "Asia/Nicosia"
+    assert timezone_for_source_text("CA Online", "https://www.caofwa.org/") == (
+        "America/Los_Angeles"
+    )
+    assert timezone_for_source_text("CA Jakarta", "https://www.cajakarta.com/meetings/") == (
+        "Asia/Jakarta"
+    )
     assert (
         timezone_for_source_text("Port Of Spain Intergroup Of A.A.", "https://example.org")
         == "America/Port_of_Spain"

@@ -141,6 +141,52 @@ def test_static_html_adapter_infers_us_timezone_from_address() -> None:
     assert candidate.occurrences[0].timezone == "America/New_York"
 
 
+def test_static_html_adapter_uses_source_country_hint_for_state_abbreviation() -> None:
+    source = static_source().model_copy(update={"country": "United States", "config": {}})
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="ohio-row",
+        source_url=source.url,
+        payload={
+            "name": "Cleveland Friday",
+            "day": "Friday",
+            "time": "6:00 pm",
+            "address_line1": "2554 West 25th St., Cleveland, OH",
+            "timezone": "UTC",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.country == "United States"
+    assert candidate.region == "Ohio"
+    assert candidate.occurrences[0].timezone == "America/New_York"
+
+
+def test_static_html_adapter_uses_source_country_hint_for_australian_state() -> None:
+    source = static_source().model_copy(update={"country": "Australia", "config": {}})
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="nsw-row",
+        source_url=source.url,
+        payload={
+            "name": "Bondi Friday",
+            "day": "Friday",
+            "time": "8:00 pm",
+            "address_line1": "138 Bondi Rd, Bondi, NSW",
+            "timezone": "UTC",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.country == "Australia"
+    assert candidate.region == "Nsw"
+    assert candidate.occurrences[0].timezone == "Australia/Sydney"
+
+
 def test_static_html_adapter_infers_timezone_from_region_hint() -> None:
     source = static_source().model_copy(update={"country": None, "config": {}})
     raw = RawMeeting(
