@@ -77,3 +77,7 @@ def test_timezone_for_country_region_handles_australian_state_abbreviation() -> 
 
 def test_timezone_for_country_region_handles_brazil_region_abbreviation() -> None:
     assert timezone_for_country_region("Brazil", "SP") == "America/Sao_Paulo"
+
+
+def test_timezone_for_country_region_handles_canadian_province_abbreviation() -> None:
+    assert timezone_for_country_region("Canada", "QC") == "America/Toronto"

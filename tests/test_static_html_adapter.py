@@ -70,6 +70,29 @@ def test_static_html_adapter_infers_timezone_from_payload_region() -> None:
     assert candidate.occurrences[0].timezone == "Australia/Perth"
 
 
+def test_static_html_adapter_infers_canada_timezone_from_address() -> None:
+    source = static_source().model_copy(update={"country": None, "config": {}})
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="quebec-row",
+        source_url=source.url,
+        payload={
+            "name": "Saint-Jerome Sunday",
+            "day": "Sunday",
+            "time": "7:00 am",
+            "address_line1": "327 Rue Saint-Georges, Saint-Jerome, QC J7Z 5A8, Canada",
+            "region": "Saint-Jerome",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.country == "Canada"
+    assert candidate.region == "Saint-Jerome"
+    assert candidate.occurrences[0].timezone == "America/Toronto"
+
+
 async def test_static_html_adapter_fetch_uses_transport() -> None:
     source = static_source()
     adapter = StaticHtmlAdapter(

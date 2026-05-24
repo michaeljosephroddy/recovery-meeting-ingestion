@@ -10,6 +10,22 @@ from app.normalize.canonical import CanonicalMeetingCandidate, MeetingOccurrence
 from app.normalize.schedule import normalize_days, parse_time
 from app.sources.registry import Source, timezone_for_country_region
 
+CANADA_REGION_ABBREVIATIONS = {
+    "AB",
+    "BC",
+    "MB",
+    "NB",
+    "NL",
+    "NS",
+    "NT",
+    "NU",
+    "ON",
+    "PE",
+    "QC",
+    "SK",
+    "YT",
+}
+
 
 class StaticHtmlAdapter:
     def __init__(
@@ -55,14 +71,19 @@ class StaticHtmlAdapter:
         payload = raw.payload
         days = normalize_days(_string(payload.get("day")))
         start = parse_time(_string(payload.get("time")))
+        address_line1 = _string(payload.get("address_line1") or payload.get("address"))
+        inferred_country, inferred_region = _country_region_from_address(address_line1)
         country = _string(payload.get("country")) or self.source.country
         region = _string(payload.get("region")) or self.source.region
         timezone = (
             _string(payload.get("timezone"))
             or self.source.config.get("timezone")
             or timezone_for_country_region(country, region)
+            or timezone_for_country_region(inferred_country, inferred_region)
             or "UTC"
         )
+        country = country or inferred_country
+        region = region or self.source.region or inferred_region
         occurrences: list[MeetingOccurrence] = []
         if days and start is not None:
             occurrences.extend(
@@ -98,7 +119,7 @@ class StaticHtmlAdapter:
             name=_string(payload.get("name")) or "Recovery Meeting",
             meeting_type=meeting_type,  # type: ignore[arg-type]
             venue_name=_string(payload.get("venue_name")),
-            address_line1=_string(payload.get("address_line1") or payload.get("address")),
+            address_line1=address_line1,
             city=_string(payload.get("city")) or self.source.config.get("city"),
             region=region,
             country=country,
@@ -120,6 +141,19 @@ def _source_record_id(payload: dict[str, Any]) -> str:
     if not basis.strip("|"):
         raise AdapterPayloadError("HTML row is missing enough fields for a source record id")
     return hashlib.sha1(basis.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+
+
+def _country_region_from_address(address: str | None) -> tuple[str | None, str | None]:
+    if not address:
+        return None, None
+    parts = [part.strip() for part in address.replace("\n", ",").split(",")]
+    country = "Canada" if any(part.lower() == "canada" for part in parts) else None
+    for part in parts:
+        tokens = [token.strip(" .").upper() for token in part.split()]
+        for token in tokens:
+            if token in CANADA_REGION_ABBREVIATIONS:
+                return country or "Canada", token
+    return country, None
 
 
 def _string(value: object) -> str | None:

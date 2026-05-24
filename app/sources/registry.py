@@ -85,16 +85,30 @@ US_REGION_TIMEZONES = {
 }
 
 CANADA_REGION_TIMEZONES = {
+    "Ab": "America/Edmonton",
     "Alberta": "America/Edmonton",
+    "Bc": "America/Vancouver",
     "British Columbia": "America/Vancouver",
+    "Mb": "America/Winnipeg",
     "Manitoba": "America/Winnipeg",
+    "Nb": "America/Moncton",
     "New Brunswick": "America/Moncton",
+    "Nl": "America/St_Johns",
     "Newfoundland And Labrador": "America/St_Johns",
+    "Ns": "America/Halifax",
     "Nova Scotia": "America/Halifax",
+    "Nt": "America/Yellowknife",
+    "Nu": "America/Iqaluit",
+    "On": "America/Toronto",
     "Ontario": "America/Toronto",
+    "Pe": "America/Halifax",
     "Prince Edward Island": "America/Halifax",
+    "Qc": "America/Toronto",
     "Quebec": "America/Toronto",
+    "Québec": "America/Toronto",
+    "Sk": "America/Regina",
     "Saskatchewan": "America/Regina",
+    "Yt": "America/Whitehorse",
 }
 
 AUSTRALIA_REGION_TIMEZONES = {
