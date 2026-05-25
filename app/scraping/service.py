@@ -7,6 +7,7 @@ from app.ingest import IngestResult, adapter_for_source
 from app.review.flags import ReviewFlag, flags_for_candidate
 from app.scraping.bmlt_hints import bmlt_endpoint_from_html
 from app.scraping.browser_crawler import BrowserCrawler
+from app.scraping.ca_source_specific import fetch_source_specific_ca_records
 from app.scraping.models import CrawlSettings, ExtractedMeeting, ScrapedPage, ScrapeSourceResult
 from app.scraping.na_brazil import fetch_na_brazil_cade_o_grupo_records
 from app.scraping.na_direct_bmlt import fetch_direct_bmlt_records
@@ -68,6 +69,13 @@ async def scrape_source(
     )
     if source_specific_na_records is not None:
         return _ingest_direct_raw_records(source, settings, source_specific_na_records)
+
+    source_specific_ca_records = await fetch_source_specific_ca_records(
+        source,
+        user_agent=settings.user_agent,
+    )
+    if source_specific_ca_records is not None:
+        return _ingest_direct_raw_records(source, settings, source_specific_ca_records)
 
     crawler = BrowserCrawler(
         source,
