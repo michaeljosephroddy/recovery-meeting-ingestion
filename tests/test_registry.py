@@ -74,6 +74,39 @@ def test_source_from_candidate_infers_single_timezone_country() -> None:
 
 def test_timezone_for_country_region_handles_australian_state_abbreviation() -> None:
     assert timezone_for_country_region("Australia", "WA") == "Australia/Perth"
+    assert timezone_for_country_region("AU", "NSW") == "Australia/Sydney"
+
+
+def test_timezone_for_country_region_handles_na_single_timezone_countries() -> None:
+    assert timezone_for_country_region("Austria") == "Europe/Vienna"
+    assert timezone_for_country_region("Bahamas") == "America/Nassau"
+    assert timezone_for_country_region("Bangladesh") == "Asia/Dhaka"
+    assert timezone_for_country_region("Armenia") == "Asia/Yerevan"
+    assert timezone_for_country_region("Bolivia") == "America/La_Paz"
+    assert timezone_for_country_region("India") == "Asia/Kolkata"
+    assert timezone_for_country_region("Moldova") == "Europe/Chisinau"
+    assert timezone_for_country_region("Nepal") == "Asia/Kathmandu"
+    assert timezone_for_country_region("Paraguay") == "America/Asuncion"
+    assert timezone_for_country_region("Israel") == "Asia/Jerusalem"
+    assert timezone_for_country_region("Ghana") == "Africa/Accra"
+    assert timezone_for_country_region("Japan") == "Asia/Tokyo"
+    assert timezone_for_country_region("Vietnam") == "Asia/Ho_Chi_Minh"
+    assert timezone_for_country_region("Estonia") == "Europe/Tallinn"
+    assert timezone_for_country_region("Czech Republic") == "Europe/Prague"
+    assert timezone_for_country_region("Chile") == "America/Santiago"
+    assert timezone_for_country_region("Turkey") == "Europe/Istanbul"
+
+
+def test_timezone_for_country_region_handles_na_russian_region_hints() -> None:
+    assert timezone_for_country_region(None, "Rostov Oblast") == "Europe/Moscow"
+    assert timezone_for_country_region(None, "Ivanovo Oblast") == "Europe/Moscow"
+    assert timezone_for_country_region("Russian Federation") is None
+
+
+def test_timezone_for_source_text_handles_na_russia_region_hints() -> None:
+    assert timezone_for_source_text("Western Russia Region") == "Europe/Moscow"
+    assert timezone_for_source_text("Ural & W Siberia Region") == "Asia/Yekaterinburg"
+    assert timezone_for_source_text("Astrakhan Area") == "Europe/Astrakhan"
 
 
 def test_timezone_for_country_region_handles_brazil_region_abbreviation() -> None:
@@ -85,9 +118,14 @@ def test_timezone_for_country_region_handles_canadian_province_abbreviation() ->
 
 
 def test_timezone_for_country_region_handles_mexican_state() -> None:
+    assert timezone_for_country_region("Mexico", "Chiapas") == "America/Mexico_City"
     assert timezone_for_country_region("Mexico", "Jalisco") == "America/Mexico_City"
+    assert timezone_for_country_region("Mexico", "Mexico City") == "America/Mexico_City"
+    assert timezone_for_country_region("Mexico", "Nuevo Leon") == "America/Monterrey"
     assert timezone_for_country_region("Mexico", "Quintana Roo") == "America/Cancun"
+    assert timezone_for_country_region("Mexico", "San Luis Potosi") == "America/Mexico_City"
     assert timezone_for_country_region("Mexico", "Sinaloa") == "America/Mazatlan"
+    assert timezone_for_country_region("Mexico", "Veracruz") == "America/Mexico_City"
 
 
 def test_timezone_for_country_region_handles_city_hint_without_country() -> None:

@@ -4,6 +4,7 @@ from typing import Annotated, Any, Protocol, runtime_checkable
 
 import typer
 from psycopg import Connection
+from psycopg.rows import dict_row
 from rich.console import Console
 
 from app.config import Settings, get_settings
@@ -23,6 +24,7 @@ from app.scraping.extract_meetings import extract_meetings_from_html
 from app.scraping.models import CrawlSettings, ScrapedPage, ScrapeSourceResult
 from app.scraping.service import ScrapeResult
 from app.scraping.service import scrape_source as run_scrape_source
+from app.scraping.zero_source_audit import audit_zero_sources, write_zero_source_audit
 from app.sources.aa_world_services import AaWorldServicesDiscovery
 from app.sources.ca_world_services import CaWorldServicesDiscovery, is_valid_ca_local_source_url
 from app.sources.na_world_services import NaWorldServicesDiscovery
@@ -33,6 +35,8 @@ from app.sources.registry import (
     SourceType,
     normalize_source_url,
     source_from_candidate,
+    timezone_for_country_region,
+    timezone_for_source_text,
 )
 from app.sources.site_classification import ClassificationResult, SourceProbeClassifier
 from app.storage.db import connect
@@ -351,9 +355,25 @@ def scrape_all(
         bool,
         typer.Option(help="Only scrape sources without a configured ingest adapter."),
     ] = False,
+    only_failed: Annotated[
+        bool,
+        typer.Option(help="Only scrape sources whose previous scrape status was failed."),
+    ] = False,
+    only_zero_records: Annotated[
+        bool,
+        typer.Option(
+            help="Only scrape sources whose previous successful scrape found zero records.",
+        ),
+    ] = False,
     include_failed: Annotated[
         bool,
         typer.Option(help="Also retry sources with previous scrape failure metadata."),
+    ] = False,
+    include_classified_unknown: Annotated[
+        bool,
+        typer.Option(
+            help="Also retry unknown sources that already have a classification reason.",
+        ),
     ] = False,
     save_artifacts: Annotated[
         bool,
@@ -363,6 +383,13 @@ def scrape_all(
         Path,
         typer.Option(help="Directory for scrape artifacts."),
     ] = Path("scrape_artifacts"),
+    source_ids: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--source-id",
+            help="Only scrape this source ID. May be provided multiple times.",
+        ),
+    ] = None,
     headful: Annotated[
         bool,
         typer.Option(help="Run Chromium visibly instead of headless."),
@@ -371,15 +398,25 @@ def scrape_all(
     settings = get_settings()
     with connect(settings) as connection:
         sources = SourceRepository(connection).list_sources(fellowship=fellowship)
+    sources = _filter_sources_by_ids(sources, source_ids)
     if only_unknown:
         sources = [source for source in sources if source.adapter_type == AdapterType.UNKNOWN]
-    if not include_failed:
+    sources = _filter_sources_for_scrape_retry(
+        sources,
+        only_failed=only_failed,
+        only_zero_records=only_zero_records,
+    )
+    if not include_failed and not only_failed:
         sources = [source for source in sources if not _source_last_scrape_failed(source)]
     shadowed_world_listing_ids = _ca_world_listings_shadowed_by_local_sources(sources)
     scrapeable = [
-        _as_browser_scrape_source(source)
+        _source_for_scrape_all(source)
         for source in sources
-        if _is_scrapeable_source(source) and source.id not in shadowed_world_listing_ids
+        if _is_scrapeable_source(
+            source,
+            include_classified_unknown=include_classified_unknown,
+        )
+        and source.id not in shadowed_world_listing_ids
     ]
     scrapeable = _select_scrape_batch(scrapeable, offset=offset, limit=limit)
 
@@ -405,6 +442,75 @@ def scrape_all(
             concurrency=concurrency,
         )
     )
+
+
+@app.command("audit-zero-sources")
+def audit_zero_sources_command(
+    fellowship: Annotated[
+        str,
+        typer.Option(help="Only audit zero-active browser sources for this fellowship."),
+    ] = "na",
+    limit: Annotated[int | None, typer.Option(help="Maximum sources to audit.")] = None,
+    offset: Annotated[
+        int,
+        typer.Option(help="Number of zero-active sources to skip before applying --limit."),
+    ] = 0,
+    concurrency: Annotated[
+        int,
+        typer.Option(min=1, help="Maximum number of live probes to run concurrently."),
+    ] = 16,
+    artifact_root: Annotated[
+        Path,
+        typer.Option(help="Root directory containing scrape artifact runs."),
+    ] = Path("scrape_artifacts"),
+    output_dir: Annotated[
+        Path,
+        typer.Option(help="Directory to write the audit files."),
+    ] = Path("scrape_artifacts/zero-source-audit"),
+    live_probe: Annotated[
+        bool,
+        typer.Option(help="Fetch source URLs when saved artifacts are missing or failed."),
+    ] = True,
+    retry_concurrency: Annotated[
+        int,
+        typer.Option(help="Concurrency value included in the generated retry command."),
+    ] = 8,
+    retry_max_pages: Annotated[
+        int,
+        typer.Option(help="Max pages value included in the generated retry command."),
+    ] = 8,
+) -> None:
+    settings = get_settings()
+    with connect(settings) as connection:
+        sources = _zero_active_browser_sources(connection, fellowship)
+    sources = _select_scrape_batch(sources, offset=offset, limit=limit)
+
+    console.print(f"Zero-source audit fellowship={fellowship}")
+    console.print(f"sources: {len(sources)}")
+    result = asyncio.run(
+        audit_zero_sources(
+            sources,
+            artifact_root=artifact_root,
+            concurrency=concurrency,
+            live_probe=live_probe,
+        )
+    )
+    retry_command = _zero_source_retry_command(
+        result.retry_source_ids,
+        fellowship=fellowship,
+        concurrency=retry_concurrency,
+        max_pages_per_source=retry_max_pages,
+    )
+    write_zero_source_audit(
+        result,
+        output_dir,
+        fellowship=fellowship,
+        retry_command=retry_command,
+    )
+    console.print(f"output_dir: {output_dir}")
+    console.print(f"curated_retry_sources: {len(result.retry_source_ids)}")
+    for bucket, count in result.bucket_counts.most_common():
+        console.print(f"- {bucket}: {count}")
 
 
 @app.command("debug-scrape-source")
@@ -556,9 +662,24 @@ def classify_sources(
         int | None,
         typer.Option(help="Maximum number of sources to classify."),
     ] = None,
+    offset: Annotated[
+        int,
+        typer.Option(help="Number of classifiable sources to skip before applying --limit."),
+    ] = 0,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            min=1,
+            help="Maximum number of sources to classify concurrently.",
+        ),
+    ] = 1,
     include_configured: Annotated[
         bool,
         typer.Option(help="Also reclassify sources that already have an ingest adapter."),
+    ] = False,
+    retry_classified_unknown: Annotated[
+        bool,
+        typer.Option(help="Also retry unknown sources that already have a classification reason."),
     ] = False,
 ) -> None:
     settings = get_settings()
@@ -574,12 +695,16 @@ def classify_sources(
         raise typer.BadParameter(f"source not found: {source_id}")
     if source_id is None and not include_configured:
         sources = [source for source in sources if source.adapter_type == AdapterType.UNKNOWN]
+    if source_id is None and not retry_classified_unknown:
+        sources = [source for source in sources if not _has_classification_reason(source)]
+    if source_id is None:
+        sources = _select_scrape_batch(sources, offset=offset, limit=limit)
     if limit is not None:
         sources = sources[:limit]
 
     console.print(f"Source classification dry_run={dry_run}")
     console.print(f"sources: {len(sources)}")
-    results = asyncio.run(_classify_sources(settings, sources))
+    results = asyncio.run(_classify_sources(settings, sources, concurrency=concurrency))
 
     for result in results:
         source = result.source
@@ -634,6 +759,287 @@ def export_snapshot(dry_run: bool = True) -> None:
         snapshot_id = "not recorded"
     console.print(f"output: {path}")
     console.print(f"snapshot_id: {snapshot_id}")
+
+
+@app.command("cleanup-timezones")
+def cleanup_timezones(
+    dry_run: bool = True,
+    fellowship: Annotated[
+        str | None,
+        typer.Option(help="Only clean missing timezone warnings for this fellowship."),
+    ] = None,
+    source_id: Annotated[
+        str | None,
+        typer.Option(help="Only clean one source ID."),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option(help="Maximum sources to process."),
+    ] = None,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            min=1,
+            help="Maximum number of sources to clean concurrently.",
+        ),
+    ] = 1,
+) -> None:
+    settings = get_settings()
+    with connect(settings) as connection:
+        source_ids = _timezone_cleanup_source_ids(
+            connection,
+            fellowship=fellowship,
+            source_id=source_id,
+            limit=limit,
+        )
+
+    console.print(f"Timezone cleanup dry_run={dry_run}")
+    console.print(f"sources: {len(source_ids)}")
+    results = asyncio.run(
+        _cleanup_timezone_sources(
+            settings,
+            source_ids,
+            dry_run=dry_run,
+            concurrency=concurrency,
+        )
+    )
+    totals = {
+        "meetings_scanned": 0,
+        "meetings_fixed": 0,
+        "occurrences_updated": 0,
+        "flags_resolved": 0,
+        "meetings_unresolved": 0,
+    }
+    for result in results:
+        for key in totals:
+            value = result[key]
+            if isinstance(value, int):
+                totals[key] += value
+        console.print(
+            f"- {result['source_id']} scanned={result['meetings_scanned']} "
+            f"fixed={result['meetings_fixed']} occurrences={result['occurrences_updated']} "
+            f"resolved={result['flags_resolved']} unresolved={result['meetings_unresolved']}"
+        )
+    console.print("Totals")
+    for key, value in totals.items():
+        console.print(f"{key}: {value}")
+    if dry_run:
+        console.print("output: not written because --dry-run was set")
+
+
+def _timezone_cleanup_source_ids(
+    connection: Connection[Any],
+    *,
+    fellowship: str | None,
+    source_id: str | None,
+    limit: int | None,
+) -> list[str]:
+    query = """
+        SELECT rf.source_id, COUNT(*) AS warning_count
+        FROM review_flags rf
+        JOIN canonical_meetings cm
+          ON cm.source_id = rf.source_id
+         AND cm.source_record_id = rf.source_record_id
+        JOIN sources s ON s.id = rf.source_id
+        WHERE rf.status = 'open'
+          AND rf.code = 'missing_timezone'
+          AND EXISTS (
+              SELECT 1
+              FROM meeting_occurrences mo
+              WHERE mo.canonical_meeting_id = cm.id
+                AND mo.timezone = 'UTC'
+          )
+    """
+    params: dict[str, object] = {}
+    if fellowship is not None:
+        query += " AND COALESCE(cm.fellowship, s.fellowship) = %(fellowship)s"
+        params["fellowship"] = fellowship
+    if source_id is not None:
+        query += " AND rf.source_id = %(source_id)s"
+        params["source_id"] = source_id
+    query += " GROUP BY rf.source_id ORDER BY warning_count DESC, rf.source_id"
+    if limit is not None:
+        query += " LIMIT %(limit)s"
+        params["limit"] = limit
+    with connection.cursor() as cursor:
+        cursor.execute(query, params)
+        return [str(row[0]) for row in cursor.fetchall()]
+
+
+async def _cleanup_timezone_sources(
+    settings: Settings,
+    source_ids: list[str],
+    *,
+    dry_run: bool,
+    concurrency: int,
+) -> list[dict[str, object]]:
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+    results: list[dict[str, object] | None] = [None] * len(source_ids)
+
+    async def cleanup_one(index: int, source_id: str) -> None:
+        async with semaphore:
+            results[index] = await asyncio.to_thread(
+                _cleanup_timezone_source,
+                settings,
+                source_id,
+                dry_run,
+            )
+
+    await asyncio.gather(
+        *(cleanup_one(index, source_id) for index, source_id in enumerate(source_ids))
+    )
+    return [result for result in results if result is not None]
+
+
+def _cleanup_timezone_source(
+    settings: Settings,
+    source_id: str,
+    dry_run: bool,
+) -> dict[str, object]:
+    with connect(settings) as connection:
+        rows = _timezone_cleanup_rows(connection, source_id)
+        meetings_fixed = 0
+        occurrences_updated = 0
+        flags_resolved = 0
+        unresolved = 0
+        for row in rows:
+            timezone = _timezone_for_cleanup_row(row)
+            if timezone is None:
+                unresolved += 1
+                continue
+            meetings_fixed += 1
+            if dry_run:
+                continue
+            occurrences_updated += _update_meeting_utc_occurrences(
+                connection,
+                str(row["meeting_id"]),
+                timezone,
+            )
+            flags_resolved += _resolve_missing_timezone_flags(
+                connection,
+                source_id,
+                str(row["source_record_id"]),
+            )
+        if not dry_run:
+            connection.commit()
+    return {
+        "source_id": source_id,
+        "meetings_scanned": len(rows),
+        "meetings_fixed": meetings_fixed,
+        "occurrences_updated": occurrences_updated,
+        "flags_resolved": flags_resolved,
+        "meetings_unresolved": unresolved,
+    }
+
+
+def _timezone_cleanup_rows(
+    connection: Connection[Any],
+    source_id: str,
+) -> list[dict[str, object]]:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute(
+            """
+            SELECT DISTINCT
+                cm.id AS meeting_id,
+                cm.source_record_id,
+                cm.name AS meeting_name,
+                cm.city AS meeting_city,
+                cm.region AS meeting_region,
+                cm.country AS meeting_country,
+                s.name AS source_name,
+                s.url AS source_url,
+                s.country AS source_country,
+                s.region AS source_region,
+                s.config AS source_config
+            FROM review_flags rf
+            JOIN canonical_meetings cm
+              ON cm.source_id = rf.source_id
+             AND cm.source_record_id = rf.source_record_id
+            JOIN sources s ON s.id = rf.source_id
+            WHERE rf.status = 'open'
+              AND rf.code = 'missing_timezone'
+              AND rf.source_id = %(source_id)s
+              AND EXISTS (
+                  SELECT 1
+                  FROM meeting_occurrences mo
+                  WHERE mo.canonical_meeting_id = cm.id
+                    AND mo.timezone = 'UTC'
+              )
+            ORDER BY cm.source_record_id
+            """,
+            {"source_id": source_id},
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def _timezone_for_cleanup_row(row: dict[str, object]) -> str | None:
+    source_config = row.get("source_config")
+    configured_timezone = None
+    if isinstance(source_config, dict):
+        value = source_config.get("timezone")
+        if isinstance(value, str) and value.strip() and value.strip() != "UTC":
+            configured_timezone = value.strip()
+    meeting_country = _cleanup_string(row.get("meeting_country"))
+    meeting_region = _cleanup_string(row.get("meeting_region"))
+    source_country = _cleanup_string(row.get("source_country"))
+    source_region = _cleanup_string(row.get("source_region"))
+    source_name = _cleanup_string(row.get("source_name"))
+    source_url = _cleanup_string(row.get("source_url"))
+    return (
+        configured_timezone
+        or timezone_for_country_region(meeting_country, meeting_region)
+        or timezone_for_country_region(source_country, meeting_region)
+        or timezone_for_country_region(source_country, source_region)
+        or timezone_for_country_region(None, meeting_region)
+        or timezone_for_country_region(None, source_region)
+        or timezone_for_source_text(source_name, source_url)
+    )
+
+
+def _cleanup_string(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _update_meeting_utc_occurrences(
+    connection: Connection[Any],
+    meeting_id: str,
+    timezone: str,
+) -> int:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE meeting_occurrences
+            SET timezone = %(timezone)s
+            WHERE canonical_meeting_id = %(meeting_id)s
+              AND timezone = 'UTC'
+            """,
+            {"meeting_id": meeting_id, "timezone": timezone},
+        )
+        return cursor.rowcount
+
+
+def _resolve_missing_timezone_flags(
+    connection: Connection[Any],
+    source_id: str,
+    source_record_id: str,
+) -> int:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE review_flags
+            SET status = 'resolved',
+                resolved_at = NOW()
+            WHERE source_id = %(source_id)s
+              AND source_record_id = %(source_record_id)s
+              AND code = 'missing_timezone'
+              AND status = 'open'
+            """,
+            {"source_id": source_id, "source_record_id": source_record_id},
+        )
+        return cursor.rowcount
 
 
 def _artifact_source_metadata_by_id(
@@ -728,31 +1134,43 @@ def _discovery_for(fellowship: str, settings: Settings, url: str | None) -> Sour
 async def _classify_sources(
     settings: Settings,
     sources: list[Source],
+    *,
+    concurrency: int = 1,
 ) -> list[ClassificationResult]:
     classifier = SourceProbeClassifier(user_agent=settings.user_agent)
-    results = []
-    for source in sources:
-        try:
-            results.append(await classifier.classify(source))
-            if settings.default_rate_limit_seconds > 0:
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+    results: list[ClassificationResult | None] = [None] * len(sources)
+
+    async def classify_one(index: int, source: Source) -> None:
+        async with semaphore:
+            results[index] = await _classify_one_source(classifier, source)
+            if settings.default_rate_limit_seconds > 0 and concurrency == 1:
                 await asyncio.sleep(settings.default_rate_limit_seconds)
-        except Exception as exc:
-            failed = source.model_copy(
-                update={
-                    "config": {
-                        **source.config,
-                        "classification": {"reason": f"classification failed: {exc}"},
-                    }
+
+    await asyncio.gather(*(classify_one(index, source) for index, source in enumerate(sources)))
+    return [result for result in results if result is not None]
+
+
+async def _classify_one_source(
+    classifier: SourceProbeClassifier,
+    source: Source,
+) -> ClassificationResult:
+    try:
+        return await classifier.classify(source)
+    except Exception as exc:
+        failed = source.model_copy(
+            update={
+                "config": {
+                    **source.config,
+                    "classification": {"reason": f"classification failed: {exc}"},
                 }
-            )
-            results.append(
-                ClassificationResult(
-                    source=failed,
-                    changed=True,
-                    reason=f"classification failed: {exc}",
-                )
-            )
-    return results
+            }
+        )
+        return ClassificationResult(
+            source=failed,
+            changed=True,
+            reason=f"classification failed: {exc}",
+        )
 
 
 def _is_ingestable_source(source: Source) -> bool:
@@ -826,6 +1244,16 @@ async def _scrape_source(
     crawl_settings: CrawlSettings,
     output_dir: Path | None,
 ) -> ScrapeResult:
+    if fixture is None and _uses_direct_ingest_for_scrape(source):
+        ingest_result = await run_ingest_source(source, settings)
+        return ScrapeResult(
+            scrape=ScrapeSourceResult(
+                source_id=source.id,
+                source_url=source.url,
+                status="succeeded",
+            ),
+            ingest=ingest_result,
+        )
     if fixture is None:
         return await run_scrape_source(
             source,
@@ -921,6 +1349,16 @@ async def _scrape_sources(
     await asyncio.gather(*(scrape_one(source) for source in sources))
 
 
+def _source_for_scrape_all(source: Source) -> Source:
+    if _uses_direct_ingest_for_scrape(source):
+        return source
+    return _as_browser_scrape_source(source)
+
+
+def _uses_direct_ingest_for_scrape(source: Source) -> bool:
+    return source.adapter_type in {AdapterType.BMLT, AdapterType.MEETING_GUIDE}
+
+
 def _as_browser_scrape_source(source: Source) -> Source:
     if source.adapter_type in {
         AdapterType.PLAYWRIGHT_BROWSER,
@@ -952,9 +1390,19 @@ def _as_browser_scrape_source(source: Source) -> Source:
     )
 
 
-def _is_scrapeable_source(source: Source) -> bool:
+def _is_scrapeable_source(
+    source: Source,
+    *,
+    include_classified_unknown: bool = False,
+) -> bool:
     if source.source_type == SourceType.WORLD_SERVICE_LISTING:
         return source.fellowship == "ca"
+    if (
+        source.adapter_type == AdapterType.UNKNOWN
+        and _has_classification_reason(source)
+        and not include_classified_unknown
+    ):
+        return False
     return (
         source.source_type
         not in {
@@ -976,6 +1424,79 @@ def _select_scrape_batch(
     if limit is not None:
         return selected[:limit]
     return selected
+
+
+def _zero_active_browser_sources(connection: Connection[Any], fellowship: str) -> list[Source]:
+    active_counts = _active_meeting_counts_by_source(connection, fellowship)
+    sources = SourceRepository(connection).list_sources(fellowship=fellowship)
+    return [
+        source
+        for source in sources
+        if source.adapter_type == AdapterType.PLAYWRIGHT_BROWSER
+        and active_counts.get(source.id, 0) == 0
+    ]
+
+
+def _active_meeting_counts_by_source(
+    connection: Connection[Any],
+    fellowship: str,
+) -> dict[str, int]:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute(
+            """
+            SELECT source_id, COUNT(*) AS meeting_count
+            FROM canonical_meetings
+            WHERE fellowship = %(fellowship)s
+              AND status = 'active'
+            GROUP BY source_id
+            """,
+            {"fellowship": fellowship},
+        )
+        return {str(row["source_id"]): int(row["meeting_count"]) for row in cursor.fetchall()}
+
+
+def _zero_source_retry_command(
+    source_ids: list[str],
+    *,
+    fellowship: str,
+    concurrency: int,
+    max_pages_per_source: int,
+) -> str:
+    source_args = " ".join(f"--source-id {source_id}" for source_id in source_ids)
+    return (
+        "PLAYWRIGHT_BROWSERS_PATH=/home/michaelroddy/repos/recovery-meeting-ingestion/"
+        ".playwright-browsers .venv/bin/python -m app.cli scrape-all "
+        f"--fellowship {fellowship} --no-dry-run --concurrency {concurrency} "
+        f"--max-pages-per-source {max_pages_per_source} "
+        f"--output-dir scrape_artifacts/{fellowship}-curated-zero-retry-YYYYMMDDTHHMMSSZ "
+        f"{source_args}"
+    ).strip()
+
+
+def _filter_sources_by_ids(
+    sources: list[Source],
+    source_ids: list[str] | None,
+) -> list[Source]:
+    if not source_ids:
+        return sources
+    wanted = set(source_ids)
+    return [source for source in sources if source.id in wanted]
+
+
+def _filter_sources_for_scrape_retry(
+    sources: list[Source],
+    *,
+    only_failed: bool = False,
+    only_zero_records: bool = False,
+) -> list[Source]:
+    if not only_failed and not only_zero_records:
+        return sources
+    return [
+        source
+        for source in sources
+        if (only_failed and _source_last_scrape_failed(source))
+        or (only_zero_records and _source_last_scrape_zero_records(source))
+    ]
 
 
 def _ca_world_listings_shadowed_by_local_sources(sources: list[Source]) -> set[str]:
@@ -1005,11 +1526,33 @@ def _source_metadata_world_source(source: Source) -> str | None:
     return world_source.strip() or None
 
 
+def _has_classification_reason(source: Source) -> bool:
+    classification = source.config.get("classification")
+    if not isinstance(classification, dict):
+        return False
+    reason = classification.get("reason")
+    return isinstance(reason, str) and bool(reason.strip())
+
+
 def _source_last_scrape_failed(source: Source) -> bool:
     scrape_config = source.config.get("scrape")
     if not isinstance(scrape_config, dict):
         return False
     return scrape_config.get("last_status") == "failed"
+
+
+def _source_last_scrape_zero_records(source: Source) -> bool:
+    if _uses_direct_ingest_for_scrape(source):
+        return False
+    scrape_config = source.config.get("scrape")
+    if not isinstance(scrape_config, dict):
+        return False
+    if scrape_config.get("last_status") != "succeeded":
+        return False
+    try:
+        return int(scrape_config.get("last_records_extracted", -1)) == 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _source_with_scrape_metadata(source: Source, scrape: ScrapeSourceResult) -> Source:
@@ -1068,7 +1611,30 @@ def _source_with_scrape_status(
         scrape_config.pop("last_successful_page_url", None)
         scrape_config.pop("last_successful_page_records", None)
         scrape_config.pop("last_successful_page_signals", None)
-    return source.model_copy(update={"config": {**source.config, "scrape": scrape_config}})
+    updates: dict[str, object] = {"config": {**source.config, "scrape": scrape_config}}
+    previous_adapter = _previous_feed_adapter(scrape_config)
+    if source.adapter_type == AdapterType.PLAYWRIGHT_BROWSER and previous_adapter is not None:
+        updates.update(
+            {
+                "adapter_type": previous_adapter,
+                "source_type": SourceType.MEETING_FEED,
+                "requires_browser": False,
+            }
+        )
+    return source.model_copy(update=updates)
+
+
+def _previous_feed_adapter(scrape_config: dict[str, object]) -> AdapterType | None:
+    value = scrape_config.get("previous_adapter_type")
+    if not isinstance(value, str):
+        return None
+    try:
+        adapter = AdapterType(value)
+    except ValueError:
+        return None
+    if adapter in {AdapterType.BMLT, AdapterType.MEETING_GUIDE}:
+        return adapter
+    return None
 
 
 def _successful_pages_from_scrape(scrape: ScrapeSourceResult) -> list[dict[str, object]]:

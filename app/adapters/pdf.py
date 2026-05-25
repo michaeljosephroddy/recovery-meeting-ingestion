@@ -1,4 +1,9 @@
 import hashlib
+import os
+import shutil
+import subprocess
+import tempfile
+from contextlib import suppress
 
 import httpx
 
@@ -49,6 +54,8 @@ class PdfAdapter:
 
 
 def extract_pdf_text(content: bytes) -> str:
+    if text := _extract_pdf_text_with_pdftotext(content):
+        return text
     try:
         from pypdf import PdfReader  # type: ignore[import-not-found]
     except ImportError as exc:
@@ -59,3 +66,30 @@ def extract_pdf_text(content: bytes) -> str:
 
     reader = PdfReader(io.BytesIO(content))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def _extract_pdf_text_with_pdftotext(content: bytes) -> str:
+    if shutil.which("pdftotext") is None:
+        return ""
+    fd, pdf_path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    text_path = f"{pdf_path}.txt"
+    try:
+        with open(pdf_path, "wb") as pdf_file:
+            pdf_file.write(content)
+        completed = subprocess.run(
+            ["pdftotext", pdf_path, text_path],
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        if completed.returncode != 0 or not os.path.exists(text_path):
+            return ""
+        with open(text_path, encoding="utf-8", errors="replace") as text_file:
+            return text_file.read()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    finally:
+        for path in (pdf_path, text_path):
+            with suppress(FileNotFoundError):
+                os.remove(path)

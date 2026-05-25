@@ -6,19 +6,25 @@ from typer.testing import CliRunner
 
 from app.cli import (
     _ca_world_listings_shadowed_by_local_sources,
+    _filter_sources_by_ids,
+    _filter_sources_for_scrape_retry,
+    _is_scrapeable_source,
     _persist_ingest_result,
+    _scrape_source,
     _scrape_sources,
     _select_scrape_batch,
+    _source_for_scrape_all,
     _source_last_scrape_failed,
     _source_with_scrape_metadata,
     _source_with_scrape_status,
+    _timezone_for_cleanup_row,
     app,
 )
 from app.config import Settings
 from app.ingest import IngestResult
 from app.scraping.models import CrawlSettings, ExtractedMeeting, ScrapedPage, ScrapeSourceResult
 from app.scraping.service import ScrapeResult
-from app.sources.registry import Source, SourceType
+from app.sources.registry import AdapterType, Source, SourceType
 
 from .conftest import FIXTURES
 
@@ -156,6 +162,186 @@ def test_select_scrape_batch_applies_offset_before_limit() -> None:
     selected = _select_scrape_batch(sources, offset=2, limit=2)
 
     assert [source.id for source in selected] == ["aa-2", "aa-3"]
+
+
+def test_filter_sources_by_ids_preserves_source_order() -> None:
+    sources = [
+        Source(
+            id=f"aa-{index}",
+            fellowship="aa",
+            name=f"Source {index}",
+            url=f"https://example.org/{index}",
+        )
+        for index in range(4)
+    ]
+
+    selected = _filter_sources_by_ids(sources, ["aa-3", "aa-1"])
+
+    assert [source.id for source in selected] == ["aa-1", "aa-3"]
+
+
+def test_scrape_all_preserves_direct_feed_sources() -> None:
+    source = Source(
+        id="na-bmlt",
+        fellowship="na",
+        name="NA BMLT",
+        url="https://example.org/main_server",
+        source_type=SourceType.MEETING_FEED,
+        adapter_type=AdapterType.BMLT,
+    )
+
+    selected = _source_for_scrape_all(source)
+
+    assert selected.adapter_type == AdapterType.BMLT
+    assert selected.source_type == SourceType.MEETING_FEED
+    assert not selected.requires_browser
+
+
+def test_scrapeable_source_skips_classified_unknown_by_default() -> None:
+    source = Source(
+        id="na-unknown",
+        fellowship="na",
+        name="NA Unknown",
+        url="https://example.org",
+        adapter_type=AdapterType.UNKNOWN,
+        config={"classification": {"reason": "no meeting page or feed found"}},
+    )
+
+    assert not _is_scrapeable_source(source)
+    assert _is_scrapeable_source(source, include_classified_unknown=True)
+
+
+def test_filter_sources_for_scrape_retry_selects_failed_and_zero_record_sources() -> None:
+    failed = Source(
+        id="na-failed",
+        fellowship="na",
+        name="Failed",
+        url="https://example.org/failed",
+        config={"scrape": {"last_status": "failed", "last_records_extracted": 0}},
+    )
+    zero = Source(
+        id="na-zero",
+        fellowship="na",
+        name="Zero",
+        url="https://example.org/zero",
+        config={"scrape": {"last_status": "succeeded", "last_records_extracted": 0}},
+    )
+    useful = Source(
+        id="na-useful",
+        fellowship="na",
+        name="Useful",
+        url="https://example.org/useful",
+        config={"scrape": {"last_status": "succeeded", "last_records_extracted": 4}},
+    )
+    feed = Source(
+        id="na-feed",
+        fellowship="na",
+        name="Feed",
+        url="https://example.org/main_server",
+        source_type=SourceType.MEETING_FEED,
+        adapter_type=AdapterType.BMLT,
+        config={"scrape": {"last_status": "succeeded", "last_records_extracted": 0}},
+    )
+
+    selected = _filter_sources_for_scrape_retry(
+        [failed, zero, useful, feed],
+        only_failed=True,
+        only_zero_records=True,
+    )
+
+    assert [source.id for source in selected] == ["na-failed", "na-zero"]
+
+
+def test_timezone_cleanup_prefers_source_region_for_missing_timezone() -> None:
+    row = {
+        "meeting_country": None,
+        "meeting_region": None,
+        "source_country": "United States",
+        "source_region": "Minnesota",
+        "source_name": "Minnesota Region",
+        "source_url": "https://example.org",
+        "source_config": {},
+    }
+
+    assert _timezone_for_cleanup_row(row) == "America/Chicago"
+
+
+def test_timezone_cleanup_leaves_broad_multi_timezone_country_ambiguous() -> None:
+    row = {
+        "meeting_country": "Russian Federation",
+        "meeting_region": None,
+        "source_country": "Russian Federation",
+        "source_region": None,
+        "source_name": "Russia Region",
+        "source_url": "https://example.org",
+        "source_config": {},
+    }
+
+    assert _timezone_for_cleanup_row(row) is None
+
+
+def test_timezone_cleanup_uses_specific_source_text_hint() -> None:
+    row = {
+        "meeting_country": "Russian Federation",
+        "meeting_region": None,
+        "source_country": "Russian Federation",
+        "source_region": None,
+        "source_name": "Ural & W Siberia Region",
+        "source_url": "https://example.org",
+        "source_config": {},
+    }
+
+    assert _timezone_for_cleanup_row(row) == "Asia/Yekaterinburg"
+
+
+def test_timezone_cleanup_uses_single_timezone_country() -> None:
+    row = {
+        "meeting_country": None,
+        "meeting_region": None,
+        "source_country": "India",
+        "source_region": None,
+        "source_name": "Delhi Area",
+        "source_url": "https://example.org",
+        "source_config": {},
+    }
+
+    assert _timezone_for_cleanup_row(row) == "Asia/Kolkata"
+
+
+async def test_scrape_source_directly_ingests_feed_adapter(monkeypatch) -> None:
+    source = Source(
+        id="na-bmlt",
+        fellowship="na",
+        name="NA BMLT",
+        url="https://example.org/main_server",
+        source_type=SourceType.MEETING_FEED,
+        adapter_type=AdapterType.BMLT,
+    )
+    calls: list[str] = []
+
+    async def fake_ingest_source(source_arg, settings_arg, fixture=None):
+        calls.append(source_arg.id)
+        assert isinstance(settings_arg, Settings)
+        assert fixture is None
+        return IngestResult(raw_records=[], candidates=[], review_flags=[])
+
+    async def unexpected_scrape_source(*args, **kwargs):
+        raise AssertionError("direct feed adapters should not launch browser scraping")
+
+    monkeypatch.setattr("app.cli.run_ingest_source", fake_ingest_source)
+    monkeypatch.setattr("app.cli.run_scrape_source", unexpected_scrape_source)
+
+    result = await _scrape_source(
+        source,
+        Settings(),
+        fixture=None,
+        crawl_settings=CrawlSettings(),
+        output_dir=None,
+    )
+
+    assert calls == ["na-bmlt"]
+    assert result.scrape.status == "succeeded"
+    assert result.scrape.pages_visited == 0
 
 
 async def test_scrape_sources_respects_concurrency(monkeypatch, tmp_path) -> None:

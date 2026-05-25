@@ -60,7 +60,14 @@ class SourceRepository:
                             THEN sources.permission_status
                         ELSE EXCLUDED.permission_status
                     END,
-                    requires_browser = sources.requires_browser OR EXCLUDED.requires_browser,
+                    requires_browser = CASE
+                        WHEN sources.adapter_type <> 'unknown'
+                            AND EXCLUDED.adapter_type = 'unknown'
+                            THEN sources.requires_browser
+                        WHEN EXCLUDED.adapter_type = 'playwright_browser'
+                            THEN TRUE
+                        ELSE EXCLUDED.requires_browser
+                    END,
                     config = sources.config || EXCLUDED.config,
                     updated_at = NOW()
                 RETURNING

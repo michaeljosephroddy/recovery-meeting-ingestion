@@ -174,10 +174,12 @@ class StaticHtmlAdapter:
         region = region or self.source.region or inferred_region
         occurrences: list[MeetingOccurrence] = []
         if days and start is not None:
+            end = parse_time(_string(payload.get("end_time")))
             occurrences.extend(
                 MeetingOccurrence(
                     day_of_week=day,
                     start_time_local=start,
+                    end_time_local=end,
                     timezone=str(timezone),
                 )
                 for day in days
@@ -210,10 +212,14 @@ class StaticHtmlAdapter:
             address_line1=address_line1,
             city=_string(payload.get("city")) or self.source.config.get("city"),
             region=region,
+            postal_code=_string(payload.get("postal_code")),
             country=country,
+            latitude=_float_or_none(payload.get("latitude")),
+            longitude=_float_or_none(payload.get("longitude")),
             online_url=online_url,  # type: ignore[arg-type]
             phone_join_info=phone,
             formats=_formats(payload.get("formats")),
+            accessibility_notes=_string(payload.get("accessibility_notes")),
             occurrences=occurrences,
         )
 
@@ -275,6 +281,15 @@ def _string(value: object) -> str | None:
         return None
     cleaned = str(value).strip()
     return cleaned or None
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _formats(value: object) -> list[str]:

@@ -255,6 +255,62 @@ async def test_ca_discover_follows_nested_world_listing_pages() -> None:
     assert local.region == "California"
 
 
+async def test_na_discover_fetches_locator_page_before_ajax_requests() -> None:
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path == "/meetingsearch/find-na/":
+            return httpx.Response(200, text="<html>locator</html>", request=request)
+        if request.method == "POST" and request.url.path.endswith("/ajax.php"):
+            form = dict(request.url.params)
+            content = request.content.decode()
+            if "action=search" in content:
+                return httpx.Response(
+                    200,
+                    json={
+                        "status": "success",
+                        "data": [],
+                        "ll_us": [{"state": "New York"}],
+                        "ll_ca": [],
+                        "ll_intl": [],
+                    },
+                    request=request,
+                )
+            if "action=listings" in content:
+                return httpx.Response(
+                    200,
+                    json={
+                        "status": "success",
+                        "data": [
+                            {
+                                "description": "Heart of New York Area",
+                                "website": "https://nny-na.org/find-a-meeting/",
+                                "country": "United States",
+                                "state": "New York",
+                                "type": "Area",
+                            }
+                        ],
+                    },
+                    request=request,
+                )
+            raise AssertionError(f"unexpected form payload: {form} {content}")
+        return httpx.Response(404, request=request)
+
+    discovery = NaWorldServicesDiscovery(
+        Settings(default_rate_limit_seconds=0),
+        transport=httpx.MockTransport(handler),
+    )
+
+    candidates = await discovery.discover(max_locations=1)
+
+    assert [method for method, _path in requests] == ["GET", "POST", "POST"]
+    assert len(candidates) == 1
+    assert str(candidates[0].url) == "https://nny-na.org/find-a-meeting/"
+    assert candidates[0].country == "United States"
+    assert candidates[0].region == "New York"
+
+
 def test_na_world_fixture_produces_na_source_candidates() -> None:
     discovery = NaWorldServicesDiscovery(Settings())
     payload = (FIXTURES / "na_locator.json").read_text()

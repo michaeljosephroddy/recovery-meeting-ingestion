@@ -1,8 +1,10 @@
 import asyncio
 import base64
 import json
+import re
 from collections import deque
 from contextlib import suppress
+from datetime import UTC, datetime
 from hashlib import sha1
 from html import escape
 from pathlib import Path
@@ -12,6 +14,7 @@ from urllib.parse import parse_qsl, urldefrag, urlencode, urljoin, urlparse, url
 from bs4 import BeautifulSoup
 
 from app.adapters.base import AdapterPayloadError
+from app.adapters.pdf import extract_pdf_text
 from app.scraping.evidence import write_scrape_evidence
 from app.scraping.extract_meetings import extract_meetings_from_html
 from app.scraping.interactions import (
@@ -28,6 +31,7 @@ from app.scraping.models import (
     ScrapedPage,
     ScrapeSourceResult,
 )
+from app.scraping.scoring import confidence_for_payload
 from app.sources.registry import Source, SourceType
 
 SKIP_PATH_SUFFIXES = (
@@ -35,6 +39,7 @@ SKIP_PATH_SUFFIXES = (
     ".doc",
     ".docx",
     ".gif",
+    ".ics",
     ".jpg",
     ".jpeg",
     ".mp3",
@@ -48,6 +53,12 @@ SKIP_PATH_SUFFIXES = (
     ".xlsx",
     ".zip",
 )
+SKIP_PATH_MARKERS = (
+    "/feed/bmlt2ics",
+)
+SKIP_QUERY_KEYS = {
+    "current-meeting-list",
+}
 COMMON_MEETING_PATHS = (
     "/meeting/",
     "/meeting",
@@ -69,12 +80,35 @@ COMMON_MEETING_PATHS = (
     "/meetings-schedule/",
     "/meeting-list",
     "/meeting-list/",
+    "/meeting-list.html",
     "/meeting-locator",
     "/meeting-locator/",
     "/meeting-locations",
     "/meeting-locations/",
+    "/meeting-schedule",
+    "/meeting-schedule/",
+    "/meetings-map",
+    "/meetings-map/",
     "/locations",
     "/locations/",
+    "/area-meetings",
+    "/area-meetings/",
+    "/local-meeting-schedule",
+    "/local-meeting-schedule/",
+    "/na-meetings",
+    "/na-meetings/",
+    "/na-meetings.html",
+    "/tabbed-map-search",
+    "/tabbed-map-search/",
+    "/tabbed-search",
+    "/tabbed-search/",
+    "/where-and-when",
+    "/where-and-when/",
+    "/where-and-when.html",
+    "/bmlt-meeting-list",
+    "/bmlt-meeting-list/",
+    "/bmlt-tabbed-search",
+    "/bmlt-tabbed-search/",
     "/find-a-meeting",
     "/find-a-meeting/",
     "/find-meeting/find-a-meeting",
@@ -132,7 +166,10 @@ class BrowserCrawler:
         try:
             async with async_playwright() as playwright:
                 browser = await playwright.chromium.launch(headless=self.settings.headless)
-                context = await browser.new_context(user_agent=self.user_agent)
+                context = await browser.new_context(
+                    user_agent=self.user_agent,
+                    ignore_https_errors=True,
+                )
                 page = await context.new_page()
                 page.set_default_timeout(self.settings.page_timeout_ms)
                 remembered_urls = remembered_meeting_page_urls(self.source)
@@ -157,15 +194,34 @@ class BrowserCrawler:
                     ):
                         continue
                     visited.add(normalized)
-                    scraped = await asyncio.wait_for(
-                        self._scrape_page(page, normalized),
-                        timeout=_page_hard_timeout_seconds(self.settings),
-                    )
+                    try:
+                        scraped = await asyncio.wait_for(
+                            self._scrape_page(
+                                page,
+                                normalized,
+                                allow_heuristic_search_form=depth >= 0,
+                            ),
+                            timeout=_page_hard_timeout_seconds(self.settings),
+                        )
+                    except Exception:
+                        if depth < 0:
+                            continue
+                        raise
                     final_normalized = normalize_crawl_url(scraped.final_url)
                     if final_normalized in visited_final:
                         continue
                     visited_final.add(final_normalized)
                     pages.append(scraped)
+                    has_pending_remembered_page = _has_pending_remembered_page(queue)
+                    if depth < 0:
+                        if should_stop_after_remembered_page(
+                            scraped,
+                            self.source,
+                            pending_queue=queue,
+                        ):
+                            break
+                        if not scraped.extracted:
+                            continue
                     if (
                         broad_fallback_allowed
                         and is_common_meeting_path(self.source.url, normalized)
@@ -177,7 +233,6 @@ class BrowserCrawler:
                             queue = _without_common_meeting_path_links(queue, self.source.url)
                             broad_fallback_enqueued = True
                             broad_fallback = []
-                    has_pending_remembered_page = _has_pending_remembered_page(queue)
                     if self.source.source_type == SourceType.WORLD_SERVICE_LISTING:
                         if (
                             not has_pending_remembered_page
@@ -255,7 +310,38 @@ class BrowserCrawler:
         )
         return self._write_evidence_if_requested(result)
 
-    async def _scrape_page(self, page: Any, url: str) -> ScrapedPage:
+    async def _scrape_page(
+        self,
+        page: Any,
+        url: str,
+        *,
+        allow_heuristic_search_form: bool = True,
+    ) -> ScrapedPage:
+        if _looks_like_downloadable_meeting_list_url(url):
+            downloaded = await _extract_meetings_from_downloadable_pdf(
+                page,
+                url,
+                self.source.config,
+            )
+            if downloaded is not None:
+                downloaded_html, downloaded_extracted = downloaded
+                return ScrapedPage(
+                    url=url,
+                    final_url=url,
+                    title="Downloaded meeting list",
+                    html=downloaded_html,
+                    page_score=0.85,
+                    page_signals=["downloaded_meeting_list_pdf"],
+                    actions=[
+                        BrowserActionTrace(
+                            action="downloaded_meeting_list_pdf",
+                            value=url,
+                            status="succeeded",
+                            message=f"extracted {len(downloaded_extracted)} records",
+                        )
+                    ],
+                    extracted=downloaded_extracted,
+                )
         browser_config = browser_config_from_source(self.source)
         wait_until = str(browser_config.get("wait_until") or "networkidle")
         try:
@@ -269,7 +355,26 @@ class BrowserCrawler:
                 timeout=self.settings.page_timeout_ms,
             )
         traces = await perform_configured_actions(page, configured_actions_from_source(self.source))
-        traces.extend(await perform_heuristic_interactions(page, self.source, self.settings))
+        pre_interaction_html = await _safe_page_content(page)
+        pre_interaction_url = str(page.url)
+        pre_interaction_score = score_html(pre_interaction_url, pre_interaction_html)
+        pre_interaction_links = prioritize_links(
+            self.source.url,
+            await _page_links(page, pre_interaction_url),
+        )
+        traces.extend(
+            await perform_heuristic_interactions(
+                page,
+                self.source,
+                self.settings,
+                allow_search_form=should_allow_heuristic_search_form(
+                    pre_interaction_url,
+                    pre_interaction_score,
+                    pre_interaction_links,
+                    requested=allow_heuristic_search_form,
+                ),
+            )
+        )
         wait_for_selector = browser_config.get("wait_for_selector")
         if wait_for_selector:
             await page.wait_for_selector(str(wait_for_selector))
@@ -341,6 +446,57 @@ class BrowserCrawler:
                 html = rendered_html
                 page_score = rendered_page_score
                 extracted = rendered_extracted
+        if not extracted and self.source.source_type != SourceType.WORLD_SERVICE_LISTING:
+            embed_result = await _extract_meetings_from_embeds(
+                page,
+                final_url,
+                html,
+                self.source.config,
+            )
+            if embed_result is not None:
+                embed_url, embed_html, embed_extracted, action = embed_result
+                traces.append(
+                    BrowserActionTrace(
+                        action=action,
+                        selector="iframe[src], embed[src], object[data]",
+                        value=embed_url,
+                        status="succeeded",
+                        message=f"extracted {len(embed_extracted)} records",
+                    )
+                )
+                html = embed_html
+                final_url = embed_url
+                page_score = PageScore(
+                    score=max(page_score.score, 0.85),
+                    signals=_dedupe_strings([*page_score.signals, action]),
+                    negative_signals=page_score.negative_signals,
+                )
+                extracted = embed_extracted
+        if not extracted and self.source.source_type != SourceType.WORLD_SERVICE_LISTING:
+            pdf_result = await _extract_meetings_from_linked_pdfs(
+                page,
+                final_url,
+                self.source.config,
+            )
+            if pdf_result is not None:
+                pdf_url, pdf_html, pdf_extracted = pdf_result
+                traces.append(
+                    BrowserActionTrace(
+                        action="pdf_meeting_list",
+                        selector="a[href$='.pdf']",
+                        value=pdf_url,
+                        status="succeeded",
+                        message=f"extracted {len(pdf_extracted)} records",
+                    )
+                )
+                html = pdf_html
+                final_url = pdf_url
+                page_score = PageScore(
+                    score=max(page_score.score, 0.85),
+                    signals=_dedupe_strings([*page_score.signals, "pdf_meeting_list"]),
+                    negative_signals=page_score.negative_signals,
+                )
+                extracted = pdf_extracted
         if (
             self.source.source_type != SourceType.WORLD_SERVICE_LISTING
             and page_score.score < self.settings.local_page_min_extraction_score
@@ -406,6 +562,8 @@ def initial_crawl_queue(
 
 
 def remembered_meeting_page_urls(source: Source) -> list[str]:
+    if _is_najapan_area_source(source.url):
+        return []
     scrape_config = source.config.get("scrape")
     if not isinstance(scrape_config, dict):
         return []
@@ -430,9 +588,49 @@ def remembered_meeting_page_urls(source: Source) -> list[str]:
         normalized = normalize_crawl_url(url)
         if normalized in seen:
             continue
+        if not _is_relevant_source_branch_link(source.url, normalized):
+            continue
         seen.add(normalized)
         deduped.append(normalized)
     return deduped[:5]
+
+
+def _is_najapan_area_source(source_url: str) -> bool:
+    parsed = urlparse(source_url)
+    if not (parsed.hostname or "").endswith("najapan.org"):
+        return False
+    parts = [part for part in (parsed.path or "").strip("/").split("/") if part]
+    return len(parts) >= 2 and parts[0] == "meeting"
+
+
+def remembered_page_expected_records(source: Source, page_url: str) -> int | None:
+    scrape_config = source.config.get("scrape")
+    if not isinstance(scrape_config, dict):
+        return None
+    normalized_page_url = normalize_crawl_url(page_url)
+    pages = scrape_config.get("successful_pages")
+    if isinstance(pages, list):
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            url = page.get("url")
+            if not isinstance(url, str):
+                continue
+            if normalize_crawl_url(url) != normalized_page_url:
+                continue
+            records = page.get("records_extracted")
+            if isinstance(records, int) and records > 0:
+                return records
+    url = scrape_config.get("last_successful_page_url")
+    records = scrape_config.get("last_successful_page_records")
+    if (
+        isinstance(url, str)
+        and normalize_crawl_url(url) == normalized_page_url
+        and isinstance(records, int)
+        and records > 0
+    ):
+        return records
+    return None
 
 
 def common_meeting_path_links(source_url: str) -> list[dict[str, str]]:
@@ -473,7 +671,14 @@ def is_allowed_url(source_url: str, candidate_url: str) -> bool:
     candidate = urlparse(candidate_url)
     if candidate.scheme not in {"http", "https"}:
         return False
+    if normalize_crawl_url(candidate_url) == normalize_crawl_url(source_url):
+        return True
     if candidate.path.lower().endswith(SKIP_PATH_SUFFIXES):
+        return False
+    if any(marker in candidate.path.lower() for marker in SKIP_PATH_MARKERS):
+        return False
+    query_keys = {key.lower() for key, _value in parse_qsl(candidate.query, keep_blank_values=True)}
+    if query_keys.intersection(SKIP_QUERY_KEYS):
         return False
     candidate_host = candidate.hostname or ""
     if candidate_host == source_host:
@@ -523,17 +728,54 @@ def _looks_like_not_found_page(page: ScrapedPage) -> bool:
 
 
 def prioritize_links(source_url: str, links: list[dict[str, str]]) -> list[dict[str, str]]:
-    allowed = [link for link in links if is_allowed_url(source_url, link["url"])]
+    allowed = [
+        link
+        for link in links
+        if is_allowed_url(source_url, link["url"])
+        and _is_relevant_source_branch_link(source_url, link["url"])
+    ]
     scored = [
-        (link, score_link(link["url"], link.get("text", "")).score)
+        (link, _priority_score(source_url, link))
         for link in allowed
     ]
     positive = [(link, score) for link, score in scored if score > 0]
     return sorted(
         [link for link, _score in positive],
-        key=lambda link: score_link(link["url"], link.get("text", "")).score,
+        key=lambda link: _priority_score(source_url, link),
         reverse=True,
     )
+
+
+def _priority_score(source_url: str, link: dict[str, str]) -> float:
+    score = score_link(link["url"], link.get("text", "")).score
+    if _is_child_path(source_url, link["url"]):
+        score += 0.4
+    return score
+
+
+def _is_child_path(source_url: str, candidate_url: str) -> bool:
+    source = urlparse(source_url)
+    candidate = urlparse(candidate_url)
+    if candidate.hostname != source.hostname:
+        return False
+    source_path = (source.path or "/").rstrip("/")
+    candidate_path = (candidate.path or "/").rstrip("/")
+    if not source_path or source_path == "/" or candidate_path == source_path:
+        return False
+    return candidate_path.startswith(f"{source_path}/")
+
+
+def _is_relevant_source_branch_link(source_url: str, candidate_url: str) -> bool:
+    source = urlparse(source_url)
+    candidate = urlparse(candidate_url)
+    if not (source.hostname or "").endswith("najapan.org"):
+        return True
+    source_parts = [part for part in (source.path or "").strip("/").split("/") if part]
+    if len(source_parts) < 2 or source_parts[0] != "meeting":
+        return True
+    area_path = f"/meeting/{source_parts[1]}".rstrip("/")
+    candidate_path = (candidate.path or "/").rstrip("/")
+    return candidate_path == area_path or candidate_path.startswith(f"{area_path}/")
 
 
 def fallback_links(source_url: str, links: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -573,6 +815,23 @@ def should_stop_after_page(
     )
 
 
+def should_stop_after_remembered_page(
+    page: ScrapedPage,
+    source: Source,
+    *,
+    pending_queue: deque[tuple[str, int]] | None = None,
+) -> bool:
+    if page.extracted_count <= 0 or _has_pending_remembered_page(pending_queue or deque()):
+        return False
+    expected_records = remembered_page_expected_records(source, page.final_url)
+    if expected_records is None:
+        return True
+    if expected_records <= 2:
+        return True
+    minimum_records = max(1, int(expected_records * 0.75))
+    return page.extracted_count >= minimum_records
+
+
 def should_stop_after_empty_meeting_directory(
     page: ScrapedPage,
     settings: CrawlSettings,
@@ -588,6 +847,32 @@ def should_stop_after_empty_meeting_directory(
         "tsml_json_feed",
     }
     return bool(stop_signals.intersection(page.page_signals))
+
+
+def should_allow_heuristic_search_form(
+    page_url: str,
+    page_score: PageScore,
+    prioritized_links: list[dict[str, str]],
+    *,
+    requested: bool,
+) -> bool:
+    if not requested:
+        return False
+    if not _has_deeper_meeting_directory_link(page_url, prioritized_links):
+        return True
+    directory_signals = {
+        "strong_public_meeting_directory",
+        "meeting_form",
+        "meeting_table",
+        "day_and_time_text",
+    }
+    if directory_signals.intersection(page_score.signals):
+        return False
+    return not any(
+        signal.startswith(("url_or_text:", "text:", "body:"))
+        and "meeting" in signal
+        for signal in page_score.signals
+    )
 
 
 def _is_landing_page_url(url: str) -> bool:
@@ -658,6 +943,8 @@ def _looks_like_deeper_meeting_directory_link(url: str, text: str) -> bool:
         "møteliste",
         "moteliste",
     )
+    if score.score >= 0.35 and any(term in path for term in directory_terms):
+        return True
     return score.score >= 0.5 and any(term in last_segment for term in directory_terms)
 
 
@@ -770,6 +1057,426 @@ async def _fetch_json_feed_text(page: Any, url: str) -> str:
     return text if isinstance(text, str) else ""
 
 
+async def _extract_meetings_from_linked_pdfs(
+    page: Any,
+    base_url: str,
+    source_config: dict[str, Any],
+) -> tuple[str, str, list[ExtractedMeeting]] | None:
+    links = _meeting_pdf_links(await _page_links(page, base_url))
+    if not links:
+        return None
+    fetches = await asyncio.gather(
+        *[_fetch_pdf_text(page, link["url"]) for link in links[:2]],
+        return_exceptions=True,
+    )
+    for link, fetched in zip(links, fetches, strict=False):
+        if not isinstance(fetched, str) or not fetched.strip():
+            continue
+        pdf_html = _html_with_pdf_text(fetched)
+        extracted = extract_meetings_from_html(
+            pdf_html,
+            source_page_url=link["url"],
+            source_config=source_config,
+        )
+        if extracted:
+            return link["url"], pdf_html, extracted
+    return None
+
+
+async def _extract_meetings_from_downloadable_pdf(
+    page: Any,
+    url: str,
+    source_config: dict[str, Any],
+) -> tuple[str, list[ExtractedMeeting]] | None:
+    text = await _fetch_pdf_text(page, url)
+    if not text.strip():
+        return None
+    html = _html_with_pdf_text(text)
+    extracted = extract_meetings_from_html(
+        html,
+        source_page_url=url,
+        source_config=source_config,
+    )
+    if not extracted:
+        return None
+    return html, extracted
+
+
+async def _extract_meetings_from_embeds(
+    page: Any,
+    base_url: str,
+    html: str,
+    source_config: dict[str, Any],
+) -> tuple[str, str, list[ExtractedMeeting], str] | None:
+    embed_urls = _embedded_urls_from_html(html, base_url)
+    for url in embed_urls:
+        if _is_nz_picker_url(url):
+            picker_html = await _fetch_nz_picker_meetings_html(page, url)
+            if not picker_html:
+                continue
+            extracted = extract_meetings_from_html(
+                picker_html,
+                source_page_url=url,
+                source_config=source_config,
+            )
+            if extracted:
+                return url, picker_html, extracted, "nz_picker_embed"
+    calendar_urls = _google_calendar_ics_urls(embed_urls)
+    if calendar_urls:
+        fetched = await asyncio.gather(
+            *[_fetch_embed_text(page, url, "text/calendar") for url in calendar_urls],
+            return_exceptions=True,
+        )
+        for url, text in zip(calendar_urls, fetched, strict=False):
+            if not isinstance(text, str) or not text.strip():
+                continue
+            extracted = _extract_google_calendar_ics_meetings(text, url)
+            if extracted:
+                return url, _html_with_rendered_text("", text), extracted, "google_calendar_ics"
+    return None
+
+
+def _embedded_urls_from_html(html: str, base_url: str) -> list[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    urls: list[str] = []
+    seen: set[str] = set()
+    for tag in soup.select("iframe[src], embed[src], object[data]"):
+        attr = "data" if tag.name == "object" else "src"
+        raw_url = str(tag.get(attr) or "").strip()
+        if not raw_url:
+            continue
+        url = normalize_crawl_url(urljoin(base_url, raw_url))
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def _is_nz_picker_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.hostname == "picker.nzna.org"
+
+
+async def _fetch_nz_picker_meetings_html(page: Any, embed_url: str) -> str:
+    parsed = urlparse(embed_url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    pieces: list[str] = []
+    for venue in ("in-person", "online"):
+        url = f"{base_url}/{venue}/SHOW%20ALL/SHOW%20ALL/"
+        text = await _fetch_embed_text(page, url, "application/json")
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        meetings = payload.get("meetings")
+        if isinstance(meetings, str) and meetings.strip():
+            pieces.append(meetings)
+    if not pieces:
+        return ""
+    return "<html><body>" + "\n".join(pieces) + "</body></html>"
+
+
+def _google_calendar_ics_urls(embed_urls: list[str]) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for embed_url in embed_urls:
+        parsed = urlparse(embed_url)
+        host = parsed.hostname or ""
+        if host not in {"calendar.google.com", "www.google.com", "google.com"}:
+            continue
+        if "/calendar/" not in parsed.path and "calendar" not in parsed.path:
+            continue
+        for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+            if key != "src":
+                continue
+            calendar_id = _decode_google_calendar_src(value)
+            if not calendar_id:
+                continue
+            url = f"https://calendar.google.com/calendar/ical/{calendar_id}/public/basic.ics"
+            if url in seen:
+                continue
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+def _decode_google_calendar_src(value: str) -> str:
+    if "@" in value:
+        return value
+    try:
+        padded = value + "=" * ((4 - len(value) % 4) % 4)
+        decoded = base64.urlsafe_b64decode(padded.encode()).decode()
+    except (ValueError, UnicodeDecodeError):
+        return value
+    return decoded if "@" in decoded else value
+
+
+async def _fetch_embed_text(page: Any, url: str, accept: str) -> str:
+    request = getattr(getattr(page, "context", None), "request", None)
+    if request is None:
+        return ""
+    try:
+        response = await request.get(
+            url,
+            headers={
+                "Accept": accept,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            timeout=20_000,
+        )
+        if getattr(response, "status", None) != 200:
+            return ""
+        return str(await response.text())
+    except Exception:
+        return ""
+
+
+def _extract_google_calendar_ics_meetings(
+    ics_text: str,
+    source_page_url: str,
+) -> list[ExtractedMeeting]:
+    events = _parse_ics_events(ics_text)
+    meetings: list[ExtractedMeeting] = []
+    calendar_timezone = _ics_calendar_timezone(ics_text)
+    for row_index, event in enumerate(events):
+        if not _is_recurring_meeting_event(event):
+            continue
+        day = _ics_event_day(event)
+        time = _ics_event_time(event)
+        name = _clean_ics_text(event.get("SUMMARY", ""))
+        location = _clean_ics_text(event.get("LOCATION", ""))
+        if not day or not time or not name or not location:
+            continue
+        payload: dict[str, Any] = {
+            "source_record_id": event.get("UID") or f"{name}-{day}-{time}",
+            "day": day,
+            "time": time,
+            "name": name,
+            "address_line1": location,
+        }
+        timezone = event.get("DTSTART_TZID") or calendar_timezone
+        if timezone:
+            payload["timezone"] = timezone
+        description = _clean_ics_text(event.get("DESCRIPTION", ""))
+        if description:
+            payload["notes"] = description
+            if "zoom" in description.lower():
+                payload["phone_join_info"] = description
+        confidence, signals = confidence_for_payload(
+            payload,
+            method="google_calendar_ics",
+            page_score=0.9,
+            repeated_structure=True,
+        )
+        meetings.append(
+            ExtractedMeeting(
+                payload={**payload, "row_index": row_index},
+                method="google_calendar_ics",
+                confidence=max(confidence, 0.82),
+                source_page_url=source_page_url,
+                signals=signals,
+                selector_hint="google_calendar_ics",
+            )
+        )
+    return meetings
+
+
+def _parse_ics_events(ics_text: str) -> list[dict[str, str]]:
+    events: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for line in _unfold_ics_lines(ics_text):
+        if line == "BEGIN:VEVENT":
+            current = {}
+            continue
+        if line == "END:VEVENT":
+            if current is not None:
+                events.append(current)
+            current = None
+            continue
+        if current is None or ":" not in line:
+            continue
+        raw_key, value = line.split(":", 1)
+        key_parts = raw_key.split(";")
+        key = key_parts[0]
+        current[key] = value
+        if key == "DTSTART":
+            for part in key_parts[1:]:
+                if part.startswith("TZID="):
+                    current["DTSTART_TZID"] = part.removeprefix("TZID=")
+    return events
+
+
+def _unfold_ics_lines(ics_text: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in ics_text.replace("\r\n", "\n").split("\n"):
+        if raw_line.startswith((" ", "\t")) and lines:
+            lines[-1] += raw_line[1:]
+        elif raw_line:
+            lines.append(raw_line)
+    return lines
+
+
+def _ics_calendar_timezone(ics_text: str) -> str:
+    for line in _unfold_ics_lines(ics_text):
+        if line.startswith("X-WR-TIMEZONE:"):
+            return line.split(":", 1)[1]
+    return ""
+
+
+def _is_recurring_meeting_event(event: dict[str, str]) -> bool:
+    rrule = event.get("RRULE", "")
+    summary = _clean_ics_text(event.get("SUMMARY", "")).lower()
+    if "FREQ=WEEKLY" not in rrule:
+        return False
+    if not _rrule_is_current(rrule):
+        return False
+    negative_terms = (
+        "anniversary",
+        "area service",
+        "asc",
+        "bbq",
+        "campout",
+        "cancelled",
+        "convention",
+        "dance",
+        "event",
+        "fundraiser",
+        "speaker jam",
+        "temporarily",
+        "workshop",
+    )
+    return not any(term in summary for term in negative_terms)
+
+
+def _rrule_is_current(rrule: str) -> bool:
+    match = re.search(r"(?:^|;)UNTIL=(\d{8})(?:T\d{6}Z?)?", rrule)
+    if match is None:
+        return True
+    until = datetime.strptime(match.group(1), "%Y%m%d").replace(tzinfo=UTC)
+    return until.date() >= datetime.now(UTC).date()
+
+
+def _ics_event_day(event: dict[str, str]) -> str:
+    byday = re.search(r"(?:^|;)BYDAY=([^;]+)", event.get("RRULE", ""))
+    if byday is not None:
+        first_day = byday.group(1).split(",", 1)[0]
+        return {
+            "SU": "Sunday",
+            "MO": "Monday",
+            "TU": "Tuesday",
+            "WE": "Wednesday",
+            "TH": "Thursday",
+            "FR": "Friday",
+            "SA": "Saturday",
+        }.get(first_day, "")
+    return ""
+
+
+def _ics_event_time(event: dict[str, str]) -> str:
+    value = event.get("DTSTART", "")
+    match = re.search(r"T(\d{2})(\d{2})", value)
+    if match is None:
+        return ""
+    return f"{int(match.group(1))}:{match.group(2)}"
+
+
+def _clean_ics_text(text: str) -> str:
+    cleaned = text.replace("\\n", " ")
+    cleaned = cleaned.replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
+    return " ".join(cleaned.split())
+
+
+async def _fetch_pdf_text(page: Any, url: str) -> str:
+    request = getattr(getattr(page, "context", None), "request", None)
+    if request is None:
+        return ""
+    try:
+        response = await request.get(
+            url,
+            headers={"Accept": "application/pdf"},
+            timeout=20_000,
+        )
+        if getattr(response, "status", None) != 200:
+            return ""
+        headers = getattr(response, "headers", {})
+        content_type = str(headers.get("content-type") if isinstance(headers, dict) else "").lower()
+        if "pdf" not in content_type and not urlparse(url).path.lower().endswith(".pdf"):
+            return ""
+        content = await response.body()
+    except Exception:
+        return ""
+    return extract_pdf_text(bytes(content))
+
+
+def _meeting_pdf_links(links: list[dict[str, str]]) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for link in links:
+        url = normalize_crawl_url(link["url"])
+        if url in seen or not _looks_like_meeting_pdf_link(url, link.get("text", "")):
+            continue
+        seen.add(url)
+        candidates.append({"url": url, "text": link.get("text", "")})
+    return candidates
+
+
+def _looks_like_meeting_pdf_link(url: str, text: str) -> bool:
+    parsed = urlparse(url)
+    if not parsed.path.lower().endswith(".pdf"):
+        return False
+    haystack = f"{text} {parsed.path}".replace("_", " ").replace("-", " ").lower()
+    negative_terms = (
+        "agenda",
+        "annual",
+        "booklet",
+        "bulletin",
+        "bylaw",
+        "campout",
+        "convention",
+        "event",
+        "flyer",
+        "guideline",
+        "introduction to na meetings",
+        "ip 29",
+        "ip-29",
+        "literature",
+        "minutes",
+        "newsletter",
+        "newsgram",
+        "policy",
+        "poster",
+        "report",
+        "service",
+        "speaker jam",
+        "workshop",
+        "en3129",
+    )
+    if any(term in haystack for term in negative_terms):
+        return False
+    positive_terms = (
+        "current meeting list",
+        "meeting list",
+        "meeting schedule",
+        "meetings updated",
+        "meetings update",
+        "na meeting",
+        "schedule",
+        "where and when",
+        "ミーティングリスト",
+        "ミーティング情報",
+        "会場案内",
+    )
+    return any(term in haystack for term in positive_terms)
+
+
+def _looks_like_downloadable_meeting_list_url(url: str) -> bool:
+    query_keys = {key.lower() for key, _value in parse_qsl(urlparse(url).query)}
+    return bool(query_keys.intersection(SKIP_QUERY_KEYS))
+
+
 async def _page_links(page: Any, base_url: str) -> list[dict[str, str]]:
     raw_links = await page.eval_on_selector_all(
         "a[href], link[rel~='alternate'][type='application/json'][href]",
@@ -863,6 +1570,14 @@ def _looks_like_deferred_render_page(html: str) -> bool:
 def _html_with_rendered_text(html: str, body_text: str) -> str:
     rendered = escape(body_text)
     return f'{html}\n<div data-rendered-text-fallback="true"><pre>{rendered}</pre></div>'
+
+
+def _html_with_pdf_text(pdf_text: str) -> str:
+    rendered = escape(pdf_text)
+    return (
+        f'<html><body><div data-pdf-text-fallback="true">'
+        f"<pre>{rendered}</pre></div></body></html>"
+    )
 
 
 async def _wix_dynamic_collection_text(page: Any) -> str:

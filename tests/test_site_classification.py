@@ -36,6 +36,7 @@ async def test_classifier_discovers_meeting_guide_feed_from_local_site() -> None
 
     assert result.source.adapter_type == AdapterType.MEETING_GUIDE
     assert result.source.source_type == SourceType.MEETING_FEED
+    assert result.source.requires_browser is False
     assert (
         result.source.config["meeting_guide_feed_url"]
         == "https://local-aa.example/wp-json/meeting-guide/v1/meetings"
@@ -70,12 +71,13 @@ async def test_classifier_discovers_bmlt_endpoint_from_local_site() -> None:
 
     assert result.source.adapter_type == AdapterType.BMLT
     assert result.source.source_type == SourceType.MEETING_FEED
+    assert result.source.requires_browser is False
     assert result.source.config["bmlt_search_endpoint"].startswith(
         "https://local-na.example/main_server/client_interface/json/"
     )
 
 
-async def test_classifier_marks_meeting_form_for_manual_review() -> None:
+async def test_classifier_marks_meeting_form_for_browser_scraping() -> None:
     source = _source("https://form-site.example/")
     classifier = SourceProbeClassifier(
         user_agent="test",
@@ -89,8 +91,28 @@ async def test_classifier_marks_meeting_form_for_manual_review() -> None:
 
     result = await classifier.classify(source)
 
-    assert result.source.adapter_type == AdapterType.MANUAL_REVIEW
+    assert result.source.adapter_type == AdapterType.PLAYWRIGHT_BROWSER
+    assert result.source.requires_browser is True
     assert "form" in result.reason
+
+
+async def test_classifier_marks_meeting_page_for_browser_scraping() -> None:
+    source = _source("https://meeting-page.example/")
+    classifier = SourceProbeClassifier(
+        user_agent="test",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                text='<a href="/meetings">Find a Meeting</a>',
+            )
+        ),
+    )
+
+    result = await classifier.classify(source)
+
+    assert result.source.adapter_type == AdapterType.PLAYWRIGHT_BROWSER
+    assert result.source.requires_browser is True
+    assert "meeting page" in result.reason
 
 
 def test_meeting_guide_adapter_uses_discovered_feed_url() -> None:

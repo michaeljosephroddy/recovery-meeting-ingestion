@@ -1,10 +1,15 @@
 from collections import deque
 
 from app.scraping.browser_crawler import (
+    _extract_google_calendar_ics_meetings,
     _fetch_json_feed_text,
+    _google_calendar_ics_urls,
     _has_deeper_meeting_directory_link,
     _has_pending_meeting_branch,
+    _html_with_pdf_text,
+    _looks_like_downloadable_meeting_list_url,
     _looks_like_not_found_page,
+    _meeting_pdf_links,
     _page_links,
     _tsml_json_feed_url_from_html,
     _without_common_meeting_path_links,
@@ -15,11 +20,15 @@ from app.scraping.browser_crawler import (
     is_common_meeting_path,
     prioritize_links,
     remembered_meeting_page_urls,
+    remembered_page_expected_records,
+    should_allow_heuristic_search_form,
     should_stop_after_empty_meeting_directory,
     should_stop_after_page,
+    should_stop_after_remembered_page,
 )
 from app.scraping.evidence import read_scrape_summary, write_scrape_evidence
 from app.scraping.extract_meetings import extract_meetings_from_html
+from app.scraping.interactions import perform_heuristic_interactions
 from app.scraping.meeting_page_detector import score_html, score_link
 from app.scraping.models import (
     BrowserActionTrace,
@@ -201,6 +210,152 @@ def test_extract_meetings_from_table_time_with_day_and_platform() -> None:
     assert meetings[0].payload["day"] == "Friday"
     assert meetings[0].payload["time"] == "3:00 PM"
     assert meetings[0].payload["phone_join_info"] == "Zoom"
+
+
+def test_extract_meetings_from_classed_rows_with_location_context() -> None:
+    html = """
+    <main>
+      <div class="location-block">
+        <div class="location-header">
+          <span class="location-badge">Texarkana AR</span>
+          <a href="/new-freedom.html" class="location-name">New Freedom</a>
+          <span class="location-addr">3911 B Quonset Dr, Texarkana AR 71854</span>
+        </div>
+        <div class="meeting-rows">
+          <div class="meeting-row">
+            <span class="meeting-day">Monday</span>
+            <span class="meeting-time">12:00 pm</span>
+            <span class="meeting-name">Open Topic</span>
+            <span class="meeting-type">Open</span>
+          </div>
+          <div class="meeting-row">
+            <span class="meeting-day">Tuesday</span>
+            <span class="meeting-time">8:00 pm</span>
+            <span class="meeting-name">Living Clean Book Study</span>
+            <span class="meeting-type">Open</span>
+          </div>
+        </div>
+      </div>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/",
+    )
+
+    assert [meeting.method for meeting in meetings] == [
+        "heuristic_classed_meeting_row",
+        "heuristic_classed_meeting_row",
+    ]
+    assert meetings[0].payload["day"] == "Monday"
+    assert meetings[0].payload["time"] == "12:00 pm"
+    assert meetings[0].payload["name"] == "Open Topic"
+    assert meetings[0].payload["venue_name"] == "New Freedom"
+    assert meetings[0].payload["address_line1"] == "3911 B Quonset Dr, Texarkana AR 71854"
+
+
+def test_extract_meetings_from_heading_schedule_table() -> None:
+    html = """
+    <main>
+      <table>
+        <tr><th colspan="8">NA Serenity Group at Sabana Liber 8, Noord</th></tr>
+        <tr><td>Monday</td><td>20:00 PM</td></tr>
+        <tr><td>Wednesday</td><td>20:00 PM</td></tr>
+      </table>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/",
+    )
+
+    assert [meeting.method for meeting in meetings] == [
+        "heuristic_heading_schedule_table",
+        "heuristic_heading_schedule_table",
+    ]
+    assert meetings[0].payload["name"] == "NA Serenity Group"
+    assert meetings[0].payload["address_line1"] == "Sabana Liber 8, Noord"
+    assert meetings[0].payload["day"] == "Monday"
+    assert meetings[0].payload["time"] == "20:00"
+
+
+def test_extract_meetings_from_localized_schedule_matrix() -> None:
+    html = """
+    <main>
+      <table>
+        <thead>
+          <tr><td></td><td class="monday">Пн</td><td class="tuesday">Вт</td></tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="3"><strong>Пятигорск</strong></td></tr>
+          <tr>
+            <td><strong>«NAдежда»</strong><br>г. Пятигорск,<br>ул. Московская, 14К1</td>
+            <td>17:30</td>
+            <td>19:00</td>
+          </tr>
+        </tbody>
+      </table>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/",
+    )
+
+    assert [meeting.method for meeting in meetings] == [
+        "heuristic_schedule_matrix_table",
+        "heuristic_schedule_matrix_table",
+    ]
+    assert meetings[0].payload["day"] == "Monday"
+    assert meetings[1].payload["day"] == "Tuesday"
+    assert meetings[0].payload["name"] == "NAдежда"
+    assert meetings[0].payload["city"] == "Пятигорск"
+    assert "ул. Московская" in meetings[0].payload["address_line1"]
+
+
+def test_extract_meetings_from_localized_location_time_sections() -> None:
+    html = """
+    <main>
+      <section class="box">
+        <header>
+          <h2>Lokacija: Rožna ulica 2, Ljubljana (Cerkev sv. Jakoba)</h2>
+        </header>
+        <p><strong>Čas: Ponedeljek, torek, četrtek, petek, sobota in nedelja ob 19.00</strong></p>
+      </section>
+      <section class="box">
+        <header>
+          <h2>Lokacija: Knjižnica Fužine - Preglov trg 15, 1000 Ljubljana</h2>
+        </header>
+        <p><strong>Čas: Sreda ob 19h</strong></p>
+      </section>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/",
+    )
+
+    assert [meeting.method for meeting in meetings] == [
+        "heuristic_location_time_section",
+        "heuristic_location_time_section",
+        "heuristic_location_time_section",
+        "heuristic_location_time_section",
+        "heuristic_location_time_section",
+        "heuristic_location_time_section",
+        "heuristic_location_time_section",
+    ]
+    assert [meeting.payload["day"] for meeting in meetings[:3]] == [
+        "Monday",
+        "Tuesday",
+        "Thursday",
+    ]
+    assert meetings[0].payload["time"] == "19:00"
+    assert meetings[-1].payload["day"] == "Wednesday"
+    assert meetings[-1].payload["time"] == "19:00"
 
 
 def test_extract_meetings_from_tab_separated_schedule_text() -> None:
@@ -1239,6 +1394,15 @@ def test_crawler_prioritizes_meeting_links_and_stays_on_site() -> None:
     assert [link["url"] for link in prioritized] == ["https://example.org/find-a-meeting"]
     assert is_allowed_url("https://example.org/", "https://meetings.example.org/list")
     assert not is_allowed_url("https://example.org/", "https://external.test/meetings")
+    assert not is_allowed_url("https://example.org/", "https://example.org/feed/bmlt2ics/")
+    assert not is_allowed_url(
+        "https://example.org/",
+        "https://example.org/?current-meeting-list=7",
+    )
+    assert is_allowed_url(
+        "https://example.org/?current-meeting-list=7",
+        "https://example.org/?current-meeting-list=7",
+    )
 
 
 async def test_crawler_collects_alternate_json_meeting_feed() -> None:
@@ -1397,6 +1561,24 @@ def test_crawler_prioritizes_ireland_meeting_schedule_tab() -> None:
     ]
 
 
+def test_crawler_prioritizes_child_schedule_links_before_global_menu() -> None:
+    links = [
+        {"url": "https://najapan.org/meeting/hokkaido/mon/", "text": "月曜日"},
+        {"url": "https://najapan.org/meeting/kanto/mon/", "text": "月曜日"},
+        {"url": "https://najapan.org/meeting/kanto/tue/", "text": "火曜日"},
+    ]
+
+    prioritized = prioritize_links("https://najapan.org/meeting/kanto/", links)
+
+    assert [link["url"] for link in prioritized[:2]] == [
+        "https://najapan.org/meeting/kanto/mon/",
+        "https://najapan.org/meeting/kanto/tue/",
+    ]
+    assert "https://najapan.org/meeting/hokkaido/mon/" not in [
+        link["url"] for link in prioritized
+    ]
+
+
 def test_crawler_prioritizes_aa_groups_links() -> None:
     links = [
         {"url": "https://example.org/service", "text": "Service"},
@@ -1407,6 +1589,241 @@ def test_crawler_prioritizes_aa_groups_links() -> None:
     prioritized = prioritize_links("https://example.org/", links)
 
     assert [link["url"] for link in prioritized] == ["https://example.org/groups"]
+
+
+def test_crawler_filters_meeting_list_pdfs() -> None:
+    links = [
+        {
+            "url": "https://example.org/files/May_NA_Meeting_List.pdf",
+            "text": "Current meeting list",
+        },
+        {
+            "url": "https://example.org/files/newsletter.pdf",
+            "text": "Newsletter",
+        },
+        {
+            "url": "https://example.org/files/service-minutes.pdf",
+            "text": "Service minutes",
+        },
+        {
+            "url": "https://na.org/wp-content/uploads/2024/05/EN3129-IP-29-English.pdf",
+            "text": "An Introduction to NA Meetings",
+        },
+        {
+            "url": "https://najapan.org/chubu/meeting/chubu.pdf",
+            "text": "中部エリアミーティングリスト・略図付き（PDF）",
+        },
+    ]
+
+    assert _meeting_pdf_links(links) == [
+        {
+            "url": "https://example.org/files/May_NA_Meeting_List.pdf",
+            "text": "Current meeting list",
+        },
+        {
+            "url": "https://najapan.org/chubu/meeting/chubu.pdf",
+            "text": "中部エリアミーティングリスト・略図付き（PDF）",
+        },
+    ]
+
+
+def test_extracts_plain_text_meetings_from_pdf_fallback() -> None:
+    html = _html_with_pdf_text(
+        """
+        Meetings:
+        Monday:
+        7:00 - 8:00pm
+        "Last House on the Block"
+        1st Baptist Franklin
+        318 Hall St
+        Franklin, VA 23851
+        Contact: Mike T. 267.414.7266
+        Tuesday:
+        7:00 - 8:00pm
+        "Earthbound Group"
+        Emmanuel Episcopal Church
+        400 N. High Street
+        Franklin VA 23851
+        """
+    )
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://outer.example.org/meeting-list.pdf",
+    )
+
+    assert len(meetings) == 2
+    assert meetings[0].method == "heuristic_pdf_text"
+    assert meetings[0].payload["name"] == "Last House on the Block"
+    assert meetings[0].payload["venue_name"] == "1st Baptist Franklin"
+    assert meetings[0].payload["address_line1"] == "318 Hall St"
+    assert meetings[1].payload["day"] == "Tuesday"
+
+
+def test_extracts_bmlt_printable_pdf_lines() -> None:
+    html = _html_with_pdf_text(
+        """
+        SUNDAY
+        Sunday Morning Survival; 10:00 AM, Shar Academy, 1851
+        W Grand Blvd, Detroit, MI, 48208 (O)
+        MONDAY
+        NOON-1:00PM
+        Nooners (O,To), Grace Bible Fellowship House, 317 S. 5th Ave, Yuma, AZ, 85364
+        """
+    )
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://example.org/?current-meeting-list=1",
+    )
+
+    assert len(meetings) == 2
+    assert meetings[0].payload["name"] == "Sunday Morning Survival"
+    assert meetings[0].payload["venue_name"] == "Shar Academy, 1851"
+    assert meetings[0].payload["address_line1"] == "W Grand Blvd, Detroit, MI, 48208 (O)"
+    assert meetings[1].payload["name"] == "Nooners"
+    assert meetings[1].payload["time"] == "12:00 pm"
+    assert meetings[1].payload["address_line1"] == (
+        "Grace Bible Fellowship House, 317 S. 5th Ave, Yuma, AZ, 85364"
+    )
+
+
+def test_extracts_japanese_pdf_meeting_rows() -> None:
+    html = _html_with_pdf_text(
+        """
+        中部エリア・ミーティング
+        曜日
+        最寄り駅
+        月曜
+        本山
+        月の風
+        19:00～20:30
+        オープン
+        １P
+        東別院
+        Ｓｔｅｐ Ｗｏｒｋｓ
+        19:00～20:00
+        オープン/O/＊/＃/P/§
+        1P
+        """
+    )
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://najapan.org/chubu/meeting/chubu.pdf",
+    )
+
+    assert len(meetings) == 2
+    assert meetings[0].payload["day"] == "Monday"
+    assert meetings[0].payload["time"] == "19:00"
+    assert meetings[0].payload["name"] == "月の風"
+    assert meetings[0].payload["venue_name"] == "本山"
+    assert meetings[1].payload["name"] == "Ｓｔｅｐ Ｗｏｒｋｓ"
+
+
+def test_extracts_japanese_paragraph_meeting_blocks() -> None:
+    html = """
+    <main>
+      <h1>月曜日・関東エリア</h1>
+      <div class="entry-content">
+        <p>●東大宮</p>
+        <p>
+          時間：19:30～20:30<br>
+          会場：東大宮コミュニティセンター3階<br>
+          場所：さいたま市見沼区東大宮4-31-17<br>
+          形式：オープンミーティング
+        </p>
+        <p>info：09026362544<br>(埼玉グループ）</p>
+        <hr>
+        <p>●香川県高松市</p>
+        <p>
+          さぬきグループ<br>
+          午後 7:00～8：30<br>
+          高松市男女共同参画センター<br>
+          住所：高松市錦町1丁目20-11<br>
+          オープン O
+        </p>
+      </div>
+    </main>
+    """
+
+    meetings = extract_meetings_from_html(
+        html,
+        source_page_url="https://najapan.org/meeting/kanto/mon/",
+    )
+
+    assert [meeting.method for meeting in meetings] == [
+        "heuristic_japanese_paragraph",
+        "heuristic_japanese_paragraph",
+    ]
+    assert meetings[0].payload["day"] == "Monday"
+    assert meetings[0].payload["time"] == "19:30"
+    assert meetings[0].payload["name"] == "東大宮"
+    assert meetings[0].payload["venue_name"] == "東大宮コミュニティセンター3階"
+    assert meetings[0].payload["address_line1"] == "さいたま市見沼区東大宮4-31-17"
+    assert meetings[1].payload["time"] == "19:00"
+    assert meetings[1].payload["name"] == "さぬきグループ"
+    assert meetings[1].payload["city"] == "香川県高松市"
+
+
+def test_crawler_detects_downloadable_meeting_list_url() -> None:
+    assert _looks_like_downloadable_meeting_list_url(
+        "https://example.org/?current-meeting-list=1"
+    )
+    assert not _looks_like_downloadable_meeting_list_url("https://example.org/meetings/")
+
+
+def test_crawler_decodes_google_calendar_embed_to_ics_url() -> None:
+    urls = _google_calendar_ics_urls(
+        [
+            (
+                "https://calendar.google.com/calendar/embed?"
+                "src=NTR1cjdhNXFhazc0NTA0cDIxZnFoYmpya2tAZ3JvdXAuY2FsZW5kYXIuZ29vZ2xlLmNvbQ"
+            )
+        ]
+    )
+
+    assert urls == [
+        (
+            "https://calendar.google.com/calendar/ical/"
+            "54ur7a5qak74504p21fqhbjrkk@group.calendar.google.com/public/basic.ics"
+        )
+    ]
+
+
+def test_extracts_weekly_meetings_from_google_calendar_ics() -> None:
+    ics = """BEGIN:VCALENDAR
+X-WR-TIMEZONE:America/Boise
+BEGIN:VEVENT
+DTSTART;TZID=America/Boise:20260217T190000
+DTEND;TZID=America/Boise:20260217T200000
+RRULE:FREQ=WEEKLY;BYDAY=TU
+UID:meeting-1@example
+LOCATION:909 Main St\\, Salmon\\, ID 83467\\, USA
+SUMMARY:SALMON - NA Meeting
+DESCRIPTION:Open\\nWheelchair
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;TZID=America/Boise:20260426T193000
+RRULE:FREQ=WEEKLY;BYDAY=SU
+UID:event-1@example
+LOCATION:123 Main St\\, Boise\\, ID
+SUMMARY:Area Service Workshop
+END:VEVENT
+END:VCALENDAR
+"""
+
+    meetings = _extract_google_calendar_ics_meetings(
+        ics,
+        "https://calendar.google.com/calendar/ical/example/public/basic.ics",
+    )
+
+    assert len(meetings) == 1
+    assert meetings[0].payload["name"] == "SALMON - NA Meeting"
+    assert meetings[0].payload["day"] == "Tuesday"
+    assert meetings[0].payload["time"] == "19:00"
+    assert meetings[0].payload["timezone"] == "America/Boise"
+    assert meetings[0].payload["address_line1"] == "909 Main St, Salmon, ID 83467, USA"
 
 
 def test_crawler_prioritizes_meeting_locations_links() -> None:
@@ -1445,6 +1862,25 @@ def test_crawler_starts_with_remembered_successful_pages() -> None:
     ]
 
 
+def test_crawler_skips_remembered_pages_for_japan_area_sources() -> None:
+    source = Source(
+        id="na-jp-kanto",
+        fellowship="na",
+        name="Kanto",
+        url="https://najapan.org/meeting/kanto/",
+        config={
+            "scrape": {
+                "successful_pages": [
+                    {"url": "https://najapan.org/meeting/online-list/", "records_extracted": 28},
+                    {"url": "https://najapan.org/meeting/kanto/mon/", "records_extracted": 12},
+                ]
+            }
+        },
+    )
+
+    assert remembered_meeting_page_urls(source) == []
+
+
 def test_crawler_reads_remembered_successful_pages_from_source_config() -> None:
     source = Source(
         id="ca-ie",
@@ -1467,6 +1903,197 @@ def test_crawler_reads_remembered_successful_pages_from_source_config() -> None:
         "https://www.caireland.live/meeting-schedule",
         "https://www.caireland.live/groups",
     ]
+
+
+def test_crawler_reads_expected_records_for_remembered_page() -> None:
+    source = Source(
+        id="ca-ie",
+        fellowship="ca",
+        name="CA Ireland",
+        url="https://www.caireland.live/",
+        config={
+            "scrape": {
+                "successful_pages": [
+                    {
+                        "url": "https://www.caireland.live/meeting-schedule",
+                        "records_extracted": 12,
+                    },
+                ],
+                "last_successful_page_url": "https://www.caireland.live/groups",
+                "last_successful_page_records": 4,
+            }
+        },
+    )
+
+    assert remembered_page_expected_records(
+        source,
+        "https://www.caireland.live/meeting-schedule#top",
+    ) == 12
+    assert remembered_page_expected_records(
+        source,
+        "https://www.caireland.live/groups",
+    ) == 4
+
+
+async def test_heuristic_interactions_can_skip_search_form_submission() -> None:
+    class FakeLocator:
+        @property
+        def first(self) -> "FakeLocator":
+            return self
+
+        async def count(self) -> int:
+            return 0
+
+        async def is_visible(self, timeout: int) -> bool:
+            return False
+
+    class FakePage:
+        search_form_queried = False
+
+        def locator(self, selector: str) -> FakeLocator:
+            if "input" in selector:
+                self.search_form_queried = True
+            return FakeLocator()
+
+    page = FakePage()
+    source = Source(id="na-wa", fellowship="na", name="Washington", url="https://example.org/")
+
+    traces = await perform_heuristic_interactions(
+        page,
+        source,
+        CrawlSettings(),
+        allow_search_form=False,
+    )
+
+    assert traces == []
+    assert not page.search_form_queried
+
+
+def test_crawler_skips_search_form_when_directory_links_are_available() -> None:
+    page_score = score_html(
+        "https://www.na-ireland.org/na-meetings/",
+        """
+        <html>
+          <title>NA Meetings</title>
+          <body>
+            <a href="/na-meetings/north/">Northern Area Meetings</a>
+            <a href="/na-meetings/east/">Eastern Area Meetings</a>
+          </body>
+        </html>
+        """,
+    )
+    links = prioritize_links(
+        "https://www.na-ireland.org/na-meetings/",
+        [
+            {
+                "url": "https://www.na-ireland.org/na-meetings/north/",
+                "text": "Northern Area Meetings",
+            },
+            {
+                "url": "https://www.na-ireland.org/?s=Ireland",
+                "text": "Search",
+            },
+        ],
+    )
+
+    assert not should_allow_heuristic_search_form(
+        "https://www.na-ireland.org/na-meetings/",
+        page_score,
+        links,
+        requested=True,
+    )
+
+
+def test_crawler_stops_after_remembered_page_matches_previous_records() -> None:
+    source = Source(
+        id="ca-ie",
+        fellowship="ca",
+        name="CA Ireland",
+        url="https://www.caireland.live/",
+        config={
+            "scrape": {
+                "last_successful_page_url": "https://www.caireland.live/meeting-schedule",
+                "last_successful_page_records": 4,
+            }
+        },
+    )
+    page = ScrapedPage(
+        url="https://www.caireland.live/meeting-schedule",
+        final_url="https://www.caireland.live/meeting-schedule",
+        title="Meetings",
+        html="",
+        extracted=[
+            ExtractedMeeting(
+                payload={"name": "Monday Main"},
+                method="test",
+                confidence=0.9,
+                source_page_url="https://www.caireland.live/meeting-schedule",
+            )
+            for _ in range(3)
+        ],
+    )
+
+    assert should_stop_after_remembered_page(page, source)
+
+
+def test_crawler_does_not_stop_after_remembered_page_large_drop() -> None:
+    source = Source(
+        id="ca-ie",
+        fellowship="ca",
+        name="CA Ireland",
+        url="https://www.caireland.live/",
+        config={
+            "scrape": {
+                "last_successful_page_url": "https://www.caireland.live/meeting-schedule",
+                "last_successful_page_records": 20,
+            }
+        },
+    )
+    page = ScrapedPage(
+        url="https://www.caireland.live/meeting-schedule",
+        final_url="https://www.caireland.live/meeting-schedule",
+        title="Meetings",
+        html="",
+        extracted=[
+            ExtractedMeeting(
+                payload={"name": "Only One"},
+                method="test",
+                confidence=0.9,
+                source_page_url="https://www.caireland.live/meeting-schedule",
+            )
+        ],
+    )
+
+    assert not should_stop_after_remembered_page(page, source)
+
+
+def test_crawler_does_not_stop_after_remembered_page_with_pending_remembered_url() -> None:
+    source = Source(
+        id="ca-ie",
+        fellowship="ca",
+        name="CA Ireland",
+        url="https://www.caireland.live/",
+    )
+    page = ScrapedPage(
+        url="https://www.caireland.live/meeting-schedule",
+        final_url="https://www.caireland.live/meeting-schedule",
+        title="Meetings",
+        html="",
+        extracted=[
+            ExtractedMeeting(
+                payload={"name": "Monday Main"},
+                method="test",
+                confidence=0.9,
+                source_page_url="https://www.caireland.live/meeting-schedule",
+            )
+        ],
+    )
+
+    assert not should_stop_after_remembered_page(
+        page,
+        source,
+        pending_queue=deque([("https://www.caireland.live/groups", -1)]),
+    )
 
 
 def test_crawler_can_fallback_to_common_meeting_paths() -> None:

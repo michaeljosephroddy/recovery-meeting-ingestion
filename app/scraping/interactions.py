@@ -45,6 +45,8 @@ async def perform_heuristic_interactions(
     page: Any,
     source: Source,
     settings: CrawlSettings,
+    *,
+    allow_search_form: bool = True,
 ) -> list[BrowserActionTrace]:
     traces: list[BrowserActionTrace] = []
     for selector in _button_selectors():
@@ -59,7 +61,7 @@ async def perform_heuristic_interactions(
         if trace is not None:
             traces.append(trace)
 
-    if len(traces) < settings.max_actions_per_page:
+    if allow_search_form and len(traces) < settings.max_actions_per_page:
         form_trace = await _try_submit_search_form(page, source)
         if form_trace is not None:
             traces.append(form_trace)
@@ -151,6 +153,8 @@ async def _try_click(
         if await locator.count() == 0:
             return None
         if not await locator.is_visible(timeout=250):
+            return None
+        if await locator.evaluate("el => Boolean(el.closest('a[href]'))"):
             return None
         action_timeout = min(timeout_ms, 1_500)
         await locator.click(timeout=action_timeout)
@@ -318,7 +322,8 @@ def browser_config_from_source(source: Source) -> dict[str, Any]:
 
 def _button_selectors() -> list[str]:
     selectors = [
-        "[aria-expanded='false']",
+        "button[aria-expanded='false']",
+        "[role='button'][aria-expanded='false']",
         "button[aria-controls]",
     ]
     for text in MEETING_BUTTON_TEXT:

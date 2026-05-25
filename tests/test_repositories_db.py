@@ -86,6 +86,41 @@ def test_discovery_upsert_preserves_configured_adapter_requires_local_db() -> No
     assert stored.config["scrape"]["artifact_import"] is True
 
 
+def test_feed_reclassification_clears_browser_requirement_requires_local_db() -> None:
+    if os.environ.get("RUN_DB_TESTS") != "1":
+        pytest.skip("set RUN_DB_TESTS=1 to run local Postgres integration tests")
+
+    settings = Settings()
+    browser_source = Source(
+        id="integration-na-browser",
+        fellowship="na",
+        name="NA Browser Source",
+        url="https://integration.example.org/na-browser",
+        normalized_url="https://integration.example.org/na-browser",
+        source_type=SourceType.LOCAL_SERVICE_BODY,
+        adapter_type=AdapterType.PLAYWRIGHT_BROWSER,
+        requires_browser=True,
+    )
+    feed_source = browser_source.model_copy(
+        update={
+            "source_type": SourceType.MEETING_FEED,
+            "adapter_type": AdapterType.BMLT,
+            "requires_browser": False,
+            "config": {"bmlt_search_endpoint": "https://integration.example.org/bmlt"},
+        }
+    )
+
+    with connect(settings) as connection:
+        repository = SourceRepository(connection)
+        repository.upsert_source(browser_source)
+        stored = repository.upsert_source(feed_source)
+        connection.rollback()
+
+    assert stored.adapter_type == AdapterType.BMLT
+    assert stored.source_type == SourceType.MEETING_FEED
+    assert stored.requires_browser is False
+
+
 def test_import_run_repository_requires_local_db() -> None:
     if os.environ.get("RUN_DB_TESTS") != "1":
         pytest.skip("set RUN_DB_TESTS=1 to run local Postgres integration tests")

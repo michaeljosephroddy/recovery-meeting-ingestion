@@ -39,6 +39,8 @@ TIME_RE = re.compile(
     r"\b(?:(?:\d{1,2}(?::|\.|;)?\d{2}|\d{1,2})\s*(?:am|pm|a\.m\.|p\.m\.)|"
     r"kl\.?\s*(?:[01]?\d|2[0-3])(?:(?::|\.)[0-5]\d)?"
     r"(?:\s*(?:to|-|–|—)\s*(?:[01]?\d|2[0-3])(?:(?::|\.)[0-5]\d)?)?|"
+    r"(?:[01]?\d|2[0-3])h|"
+    r"(?:[01]?\d|2[0-3])\.[0-5]\d|"
     r"(?:[01]?\d|2[0-3]):[0-5]\d"
     r"(?:\s*(?:to|-|–|—)\s*(?:[01]?\d|2[0-3]):[0-5]\d)?|"
     r"12\s*noon|midnight)"
@@ -99,6 +101,8 @@ def _is_strong_public_meeting_directory(path: str, query: str, text: str) -> boo
             "find an online meeting",
             "find a face-to-face meeting",
             "meeting schedule",
+            "srečanja",
+            "srecanja",
             "view all meetings",
         )
     )

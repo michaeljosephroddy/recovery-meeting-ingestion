@@ -536,3 +536,19 @@ Snapshot:
 - Output: `snapshots/meetings-2026-05-24T130219Z.json` and `snapshots/latest.json`.
 - Snapshot DB row: `f5c16b90-af1e-4eac-9242-a3ff9fc5eee2`, `101,600` meetings, `0` blocked by review.
 - Remaining open review flags: `5` NA `possible_personal_contact`, `2` NA `possible_private_online_credential`.
+
+## 2026-05-24 NA Stale Warning Cleanup
+
+The remaining NA contact and credential warnings were stale under the current review policy. All seven open flags were on `na-fae97e8f1181` / Heart of New York Area and had no live canonical meeting attachment; current review generation no longer creates these warnings for listed meeting contact or access data.
+
+Cleanup:
+
+- `possible_personal_contact`: `5` resolved.
+- `possible_private_online_credential`: `2` resolved.
+- Remaining open review flags: `0`.
+
+Snapshot:
+
+- Export command: `.venv/bin/python -m app.cli export-snapshot --no-dry-run`
+- Output: `snapshots/meetings-2026-05-24T144522Z.json` and `snapshots/latest.json`.
+- Snapshot DB row: `c55954d8-b25b-47c2-b7cb-f4bb7eb45af0`, `101,600` meetings, `0` blocked by review.

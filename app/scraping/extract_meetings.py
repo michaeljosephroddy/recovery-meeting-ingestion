@@ -13,22 +13,25 @@ from app.scraping.models import ExtractedMeeting
 from app.scraping.scoring import confidence_for_payload
 
 TIME_RE = re.compile(
-    r"\b(?:(?:\d{1,2}(?::|\.|;)?\d{2}|\d{1,2})\s*(?:am|pm|a\.m\.|p\.m\.)|"
+    r"\b(?:(?:\d{1,2}(?::|\.|;)?\d{2}|\d{1,2})\s*(?:am|pm|a|p|a\.m\.|p\.m\.)|"
     r"kl\.?\s*(?:[01]?\d|2[0-3])(?:(?::|\.)[0-5]\d)?"
-    r"(?:\s*(?:to|-|–|—)\s*(?:[01]?\d|2[0-3])(?:(?::|\.)[0-5]\d)?)?|"
+    r"(?:\s*(?:to|-|–|—|〜|～)\s*(?:[01]?\d|2[0-3])(?:(?::|\.)[0-5]\d)?)?|"
+    r"noon|"
+    r"(?:[01]?\d|2[0-3])h|"
+    r"(?:[01]?\d|2[0-3])\.[0-5]\d|"
     r"(?:[01]?\d|2[0-3]):[0-5]\d"
-    r"(?:\s*(?:to|-|–|—)\s*(?:[01]?\d|2[0-3]):[0-5]\d)?|"
+    r"(?:\s*(?:to|-|–|—|〜|～)\s*(?:[01]?\d|2[0-3]):[0-5]\d)?|"
     r"12\s*noon|midnight)"
     r"(?=\W|$)",
     re.IGNORECASE,
 )
 TIME_RANGE_TRAILING_MARKER_RE = re.compile(
-    r"\b(?P<start>\d{1,2}(?::|\.|;)\d{2})\s*(?:to|-|–|—)\s*"
-    r"\d{1,2}(?::|\.|;)\d{2}\s*(?P<marker>am|pm|a\.m\.|p\.m\.)\b",
+    r"\b(?P<start>\d{1,2}(?::|\.|;)\d{2})\s*(?:to|-|–|—|〜|～)\s*"
+    r"\d{1,2}(?::|\.|;)\d{2}\s*(?P<marker>am|pm|a|p|a\.m\.|p\.m\.)\b",
     re.IGNORECASE,
 )
 NAME_TIME_RE = re.compile(
-    r"\b(?:\d{1,2}(?::|\.|;)?\d{0,2}\s*(?:am|pm|a\.m\.|p\.m\.)|"
+    r"\b(?:\d{1,2}(?::|\.|;)?\d{0,2}\s*(?:am|pm|a|p|a\.m\.|p\.m\.)|"
     r"\d{1,2}(?::|\.|;)\d{2})\b",
     re.IGNORECASE,
 )
@@ -74,6 +77,52 @@ DAY_INDEX_NAMES = {
     5: "Friday",
     6: "Saturday",
 }
+LOCAL_DAY_NAMES = {
+    "вс": "Sunday",
+    "воскресенье": "Sunday",
+    "неделя": "Sunday",
+    "nedelja": "Sunday",
+    "日": "Sunday",
+    "日曜": "Sunday",
+    "日曜日": "Sunday",
+    "пн": "Monday",
+    "понедельник": "Monday",
+    "ponedeljek": "Monday",
+    "月": "Monday",
+    "月曜": "Monday",
+    "月曜日": "Monday",
+    "вт": "Tuesday",
+    "вторник": "Tuesday",
+    "torek": "Tuesday",
+    "火": "Tuesday",
+    "火曜": "Tuesday",
+    "火曜日": "Tuesday",
+    "ср": "Wednesday",
+    "среда": "Wednesday",
+    "sreda": "Wednesday",
+    "水": "Wednesday",
+    "水曜": "Wednesday",
+    "水曜日": "Wednesday",
+    "чт": "Thursday",
+    "четверг": "Thursday",
+    "četrtek": "Thursday",
+    "cetrtek": "Thursday",
+    "木": "Thursday",
+    "木曜": "Thursday",
+    "木曜日": "Thursday",
+    "пт": "Friday",
+    "пятница": "Friday",
+    "petek": "Friday",
+    "金": "Friday",
+    "金曜": "Friday",
+    "金曜日": "Friday",
+    "сб": "Saturday",
+    "суббота": "Saturday",
+    "sobota": "Saturday",
+    "土": "Saturday",
+    "土曜": "Saturday",
+    "土曜日": "Saturday",
+}
 
 
 def extract_meetings_from_html(
@@ -99,10 +148,21 @@ def extract_meetings_from_html(
     extracted.extend(_extract_tsml_tables(soup, source_page_url, page_score))
     extracted.extend(_extract_bmlt_tables(soup, source_page_url, page_score))
     extracted.extend(_extract_tables(soup, source_page_url, page_score))
+    extracted.extend(_extract_schedule_matrix_tables(soup, source_page_url, page_score))
+    extracted.extend(_extract_heading_schedule_tables(soup, source_page_url, page_score))
+    extracted.extend(_extract_classed_meeting_rows(soup, source_page_url, page_score))
+    japanese_paragraph = _extract_japanese_paragraph_meetings(
+        soup,
+        source_page_url,
+        page_score,
+    )
+    if japanese_paragraph:
+        return _dedupe_extracted([*extracted, *japanese_paragraph])
     tab_separated = [
         *_extract_tab_separated_schedule(soup, source_page_url, page_score),
         *_extract_simple_tabbed_day_schedule(soup, source_page_url, page_score),
         *_extract_labelled_detail_blocks(soup, source_page_url, page_score),
+        *_extract_location_time_sections(soup, source_page_url, page_score),
     ]
     if tab_separated:
         return _dedupe_extracted([*extracted, *tab_separated])
@@ -116,6 +176,8 @@ def extract_meetings_from_html(
         extracted.extend(_extract_inline_schedule_lines(soup, source_page_url, page_score))
     if not extracted:
         extracted.extend(_extract_structured_text_meetings(soup, source_page_url, page_score))
+    if not extracted:
+        extracted.extend(_extract_pdf_text_meetings(soup, source_page_url, page_score))
     if not extracted:
         extracted.extend(_extract_sequenced_text_meetings(soup, source_page_url, page_score))
     if not extracted:
@@ -438,6 +500,429 @@ def _extract_bmlt_tables(
                 )
             )
     return meetings
+
+
+def _extract_schedule_matrix_tables(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    meetings: list[ExtractedMeeting] = []
+    for table_index, table in enumerate(soup.select("table")):
+        headers = _schedule_matrix_days(table)
+        if len(headers) < 2:
+            continue
+        city: str | None = None
+        row_index = 0
+        for row in table.select("tbody tr") or table.select("tr")[1:]:
+            cells = row.select("td")
+            if not cells:
+                continue
+            if len(cells) == 1 or _has_colspan(cells[0]):
+                city = _clean_text(cells[0]) or city
+                continue
+            if len(cells) < len(headers) + 1:
+                continue
+            context = _payload_from_matrix_context_cell(cells[0], city)
+            for offset, day in enumerate(headers, start=1):
+                time_text = _clean_text(cells[offset])
+                if not time_text or not (time := _first_time_match(time_text)):
+                    continue
+                payload = {
+                    **context,
+                    "day": day,
+                    "time": _normalize_extracted_time(time),
+                }
+                payload = _without_empty(payload)
+                if not _looks_like_meeting_payload(payload):
+                    continue
+                confidence, signals = confidence_for_payload(
+                    payload,
+                    method="heuristic_schedule_matrix_table",
+                    page_score=page_score,
+                    repeated_structure=True,
+                    table_headers=True,
+                )
+                meetings.append(
+                    ExtractedMeeting(
+                        payload={**payload, "row_index": row_index},
+                        method="heuristic_schedule_matrix_table",
+                        confidence=max(confidence, 0.82),
+                        source_page_url=source_page_url,
+                        signals=signals,
+                        selector_hint=f"matrix_table:nth-of-type({table_index + 1})",
+                    )
+                )
+                row_index += 1
+    return meetings
+
+
+def _schedule_matrix_days(table: Tag) -> list[str]:
+    header_row = table.select_one("thead tr") or table.select_one("tr")
+    if header_row is None:
+        return []
+    header_cells = header_row.select("th, td")
+    if len(header_cells) < 3:
+        return []
+    days: list[str] = []
+    for cell in header_cells[1:]:
+        day = _day_from_schedule_line(_clean_text(cell))
+        if day is None:
+            day = next(
+                (
+                    _day_from_schedule_line(str(class_name))
+                    for class_name in _tag_classes(cell)
+                    if _day_from_schedule_line(str(class_name))
+                ),
+                None,
+            )
+        if day is None:
+            return []
+        days.append(day)
+    return days
+
+
+def _payload_from_matrix_context_cell(cell: Tag, city: str | None) -> dict[str, Any]:
+    lines = [
+        _clean_fragment(line)
+        for line in cell.get_text("\n", strip=True).splitlines()
+        if _clean_fragment(line)
+    ]
+    payload: dict[str, Any] = {}
+    if lines:
+        payload["name"] = _clean_meeting_name_line(lines[0])
+    if city:
+        payload["city"] = city
+    address_parts = [
+        line
+        for line in lines[1:]
+        if _looks_like_address_fallback(line) or line.lower().startswith(("г.", "ул."))
+    ]
+    if address_parts:
+        payload["address_line1"] = ", ".join(address_parts[:3])
+    elif len(lines) > 1:
+        payload["venue_name"] = " ".join(lines[1:3])
+    return payload
+
+
+def _extract_heading_schedule_tables(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    meetings: list[ExtractedMeeting] = []
+    for table_index, table in enumerate(soup.select("table")):
+        heading = _heading_schedule_table_title(table)
+        if not heading:
+            continue
+        context = _payload_from_heading_schedule_title(heading)
+        row_index = 0
+        for row in table.select("tr")[1:]:
+            cells = row.select("td")
+            if len(cells) < 2:
+                continue
+            day = _day_from_schedule_line(_clean_text(cells[0]))
+            if day is None:
+                continue
+            for time_cell in cells[1:]:
+                time_text = _clean_text(time_cell)
+                if not time_text or not (time := _first_time_match(time_text)):
+                    continue
+                payload = {
+                    **context,
+                    "day": day,
+                    "time": _normalize_extracted_time(time),
+                }
+                payload = _without_empty(payload)
+                if not _looks_like_meeting_payload(payload):
+                    continue
+                confidence, signals = confidence_for_payload(
+                    payload,
+                    method="heuristic_heading_schedule_table",
+                    page_score=page_score,
+                    repeated_structure=True,
+                    table_headers=True,
+                )
+                meetings.append(
+                    ExtractedMeeting(
+                        payload={**payload, "row_index": row_index},
+                        method="heuristic_heading_schedule_table",
+                        confidence=max(confidence, 0.82),
+                        source_page_url=source_page_url,
+                        signals=signals,
+                        selector_hint=f"heading_table:nth-of-type({table_index + 1})",
+                    )
+                )
+                row_index += 1
+    return meetings
+
+
+def _heading_schedule_table_title(table: Tag) -> str | None:
+    first_row = table.select_one("tr")
+    if first_row is None:
+        return None
+    heading = first_row.select_one("th[colspan], td[colspan]")
+    if heading is None:
+        return None
+    title = _clean_text(heading)
+    if not title or TIME_RE.search(title) or _day_from_schedule_line(title):
+        return None
+    return title
+
+
+def _payload_from_heading_schedule_title(title: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    split = re.split(r"\s+\bat\b\s+", title, maxsplit=1, flags=re.IGNORECASE)
+    if len(split) == 2:
+        payload["name"] = _clean_meeting_name_line(split[0])
+        payload["address_line1"] = _clean_fragment(split[1])
+        return payload
+    payload["name"] = _clean_meeting_name_line(title)
+    if _looks_like_address_fallback(title):
+        payload["address_line1"] = title
+    return payload
+
+
+def _extract_location_time_sections(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    meetings: list[ExtractedMeeting] = []
+    row_index = 0
+    for section_index, section in enumerate(soup.select("section, .box")):
+        if not isinstance(section, Tag):
+            continue
+        location = _location_time_section_location(section)
+        if not location:
+            continue
+        for line in _location_time_section_schedule_lines(section):
+            days = _days_from_schedule_text(line)
+            time = _first_time_match(line)
+            if not days or not time:
+                continue
+            for day in days:
+                payload: dict[str, Any] = {
+                    "name": _location_time_section_name(line),
+                    "day": day,
+                    "time": _normalize_extracted_time(time),
+                    "address_line1": location,
+                }
+                payload = _without_empty(payload)
+                if not _looks_like_meeting_payload(payload):
+                    continue
+                confidence, signals = confidence_for_payload(
+                    payload,
+                    method="heuristic_location_time_section",
+                    page_score=page_score,
+                    repeated_structure=True,
+                )
+                meetings.append(
+                    ExtractedMeeting(
+                        payload={**payload, "row_index": row_index},
+                        method="heuristic_location_time_section",
+                        confidence=max(confidence, 0.78),
+                        source_page_url=source_page_url,
+                        signals=signals,
+                        selector_hint=f"location_time_section:{section_index}",
+                    )
+                )
+                row_index += 1
+    return meetings
+
+
+def _location_time_section_location(section: Tag) -> str | None:
+    heading = _first_text(section, "h1, h2, h3, header")
+    if not heading:
+        return None
+    match = re.search(r"\blokacija\s*:\s*(.+)", heading, flags=re.IGNORECASE)
+    if match:
+        return _clean_fragment(match.group(1))
+    if _looks_like_address_fallback(heading):
+        return heading
+    return None
+
+
+def _location_time_section_schedule_lines(section: Tag) -> list[str]:
+    lines: list[str] = []
+    for node in section.select("p, li"):
+        text = _clean_text(node)
+        if text and re.search(r"\b(?:čas|cas|time)\s*:", text, flags=re.IGNORECASE):
+            lines.append(text)
+    return lines
+
+
+def _location_time_section_name(line: str) -> str:
+    before_time = re.split(r"\b(?:čas|cas|time)\s*:", line, maxsplit=1, flags=re.IGNORECASE)[0]
+    cleaned = _clean_meeting_name_line(before_time)
+    return cleaned if cleaned else "NA Meeting"
+
+
+def _has_colspan(cell: Tag) -> bool:
+    try:
+        return int(str(cell.get("colspan") or "1")) > 1
+    except ValueError:
+        return False
+
+
+def _extract_classed_meeting_rows(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    meetings: list[ExtractedMeeting] = []
+    selectors = (
+        ".meeting-row",
+        "[class*='meeting-row']",
+        "[class*='meeting_row']",
+        "[class*='meeting-item']",
+        "[class*='meeting_item']",
+    )
+    seen_tags: set[int] = set()
+    for row_index, row in enumerate(soup.select(", ".join(selectors))):
+        if not isinstance(row, Tag) or id(row) in seen_tags:
+            continue
+        seen_tags.add(id(row))
+        if row.find_parent("table") is not None:
+            continue
+        payload = _payload_from_classed_meeting_row(row, source_page_url)
+        payload = _without_empty(payload)
+        if not _looks_like_meeting_payload(payload):
+            continue
+        confidence, signals = confidence_for_payload(
+            payload,
+            method="heuristic_classed_meeting_row",
+            page_score=page_score,
+            repeated_structure=True,
+        )
+        meetings.append(
+            ExtractedMeeting(
+                payload={**payload, "row_index": row_index},
+                method="heuristic_classed_meeting_row",
+                confidence=max(confidence, 0.78),
+                source_page_url=source_page_url,
+                signals=signals,
+                selector_hint=_classed_meeting_row_selector_hint(row),
+            )
+        )
+    return meetings
+
+
+def _payload_from_classed_meeting_row(row: Tag, source_page_url: str) -> dict[str, Any]:
+    text = _clean_text(row)
+    day_text = _first_text(
+        row,
+        ".meeting-day, [class*='meeting-day'], [class*='meeting_day'], [class='day']",
+    )
+    time_text = _first_text(
+        row,
+        ".meeting-time, [class*='meeting-time'], [class*='meeting_time'], "
+        "[class='time'], time",
+    )
+    name_text = _first_text(
+        row,
+        ".meeting-name, [class*='meeting-name'], [class*='meeting_name'], [class='name']",
+    )
+    formats_text = _first_text(
+        row,
+        ".meeting-type, [class*='meeting-type'], [class*='meeting_type'], "
+        "[class*='format'], [class='type']",
+    )
+
+    payload: dict[str, Any] = {}
+    if day := _day_from_schedule_line(day_text or text):
+        payload["day"] = day
+    if time := _first_time_match(time_text or text):
+        payload["time"] = _normalize_extracted_time(time)
+    if name := _clean_meeting_name_line(name_text or "") or _classed_row_name_from_text(
+        text,
+        payload,
+    ):
+        payload["name"] = name
+    if formats_text and _looks_like_format_text(formats_text):
+        payload["formats"] = formats_text
+
+    context = _classed_meeting_row_context(row)
+    payload.update({key: value for key, value in context.items() if not payload.get(key)})
+    for link in row.select("a[href]"):
+        href = str(link.get("href") or "")
+        if href and (online_url := _meeting_url_or_none(urljoin(source_page_url, href))):
+            payload.setdefault("online_url", online_url)
+    return payload
+
+
+def _classed_meeting_row_context(row: Tag) -> dict[str, str]:
+    context_tag = _closest_classed_meeting_context(row)
+    if context_tag is None:
+        return {}
+    context: dict[str, str] = {}
+    if venue := _first_text(
+        context_tag,
+        ".location-name, .venue-name, .group-name, "
+        "[class*='location-name'], [class*='venue-name'], [class*='group-name']",
+    ):
+        context["venue_name"] = venue
+    if address := _first_text(
+        context_tag,
+        ".location-addr, .meeting-address, .address, "
+        "[class*='location-addr'], [class*='address'], [class*='addr']",
+    ):
+        context["address_line1"] = address
+    if (
+        (badge := _first_text(context_tag, ".location-badge, [class*='location-badge']"))
+        and not context.get("city")
+        and not _looks_like_format_text(badge)
+    ):
+        context["city"] = badge
+    return context
+
+
+def _closest_classed_meeting_context(row: Tag) -> Tag | None:
+    class_terms = ("location", "venue", "group", "meeting")
+    for parent in row.parents:
+        if not isinstance(parent, Tag):
+            continue
+        if parent.name in {"html", "body"}:
+            break
+        if parent.select_one(
+            ".location-name, .venue-name, .group-name, .location-addr, "
+            ".meeting-address, .address, [class*='location-name'], "
+            "[class*='venue-name'], [class*='group-name'], [class*='location-addr'], "
+            "[class*='address'], [class*='addr']"
+        ):
+            return parent
+        classes = " ".join(class_name.lower() for class_name in _tag_classes(parent))
+        if any(term in classes for term in class_terms) and parent.name in {"section", "article"}:
+            return parent
+    return None
+
+
+def _classed_row_name_from_text(text: str, payload: dict[str, Any]) -> str | None:
+    cleaned = text
+    if day := str(payload.get("day") or ""):
+        cleaned = re.sub(rf"\b{re.escape(day)}s?\b", "", cleaned, count=1, flags=re.IGNORECASE)
+    if time := str(payload.get("time") or ""):
+        cleaned = cleaned.replace(time, "", 1)
+    cleaned = _clean_meeting_name_line(cleaned)
+    if not cleaned:
+        return None
+    if _looks_like_format_text(cleaned):
+        return None
+    return cleaned
+
+
+def _classed_meeting_row_selector_hint(row: Tag) -> str:
+    classes = _tag_classes(row)
+    return "." + ".".join(classes) if classes else str(row.name or "meeting-row")
+
+
+def _tag_classes(tag: Tag) -> list[str]:
+    value = tag.get("class")
+    if isinstance(value, list):
+        return [str(class_name) for class_name in value if str(class_name)]
+    if isinstance(value, str):
+        return [class_name for class_name in value.split() if class_name]
+    return []
 
 
 def _extract_tab_separated_schedule(
@@ -1001,6 +1486,218 @@ def _payloads_from_inline_schedule_line(line: str) -> list[dict[str, str]]:
     return payloads
 
 
+def _extract_japanese_paragraph_meetings(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    containers: list[Tag] = soup.select(".entry-content") or []
+    meetings: list[ExtractedMeeting] = []
+    row_index = 0
+    for container_index, container in enumerate(containers):
+        if not _contains_cjk(_clean_text(container)):
+            continue
+        current_day = _day_from_title(container) or _day_from_title(soup)
+        current_block: list[str] = []
+
+        def flush_block(day: str | None, selector_index: int) -> None:
+            nonlocal current_block, row_index
+            payload = _payload_from_japanese_paragraph_block(current_block, day)
+            current_block = []
+            if not payload or not _looks_like_meeting_payload(payload):
+                return
+            confidence, signals = confidence_for_payload(
+                payload,
+                method="heuristic_japanese_paragraph",
+                page_score=max(page_score, 0.72),
+                repeated_structure=True,
+            )
+            meetings.append(
+                ExtractedMeeting(
+                    payload={**payload, "row_index": row_index},
+                    method="heuristic_japanese_paragraph",
+                    confidence=max(confidence, 0.75),
+                    source_page_url=source_page_url,
+                    signals=signals,
+                    selector_hint=f"japanese_paragraph:{selector_index}",
+                )
+            )
+            row_index += 1
+
+        for child in container.children:
+            if not isinstance(child, Tag):
+                continue
+            if child.name == "hr":
+                flush_block(current_day, container_index)
+                continue
+            if child.name not in {"p", "li", "div"}:
+                continue
+            for line in _japanese_paragraph_lines(child):
+                if day := _japanese_day_heading(line):
+                    flush_block(current_day, container_index)
+                    current_day = day
+                    remainder = _clean_fragment(_strip_japanese_day_heading(line))
+                    if not remainder:
+                        continue
+                    line = remainder
+                if _starts_japanese_meeting_block(line):
+                    flush_block(current_day, container_index)
+                current_block.append(line)
+        flush_block(current_day, container_index)
+    return meetings
+
+
+def _japanese_paragraph_lines(node: Tag) -> list[str]:
+    return [
+        _clean_fragment(line)
+        for line in node.get_text("\n", strip=True).splitlines()
+        if _clean_fragment(line)
+    ]
+
+
+def _japanese_day_heading(line: str) -> str | None:
+    cleaned = _clean_fragment(line)
+    if TIME_RE.search(cleaned):
+        return None
+    if re.search(r"[●■]", cleaned):
+        return None
+    return _day_from_schedule_line(cleaned)
+
+
+def _strip_japanese_day_heading(line: str) -> str:
+    cleaned = _clean_fragment(line)
+    for term in sorted(LOCAL_DAY_NAMES, key=len, reverse=True):
+        if not _contains_cjk(term):
+            continue
+        cleaned = re.sub(
+            rf"^[【\[\(（\s]*{re.escape(term)}[】\]\)）\s:：・-]*",
+            "",
+            cleaned,
+            count=1,
+        )
+    return cleaned
+
+
+def _starts_japanese_meeting_block(line: str) -> bool:
+    return bool(re.match(r"^[●■]\s*\S+", line))
+
+
+def _payload_from_japanese_paragraph_block(
+    lines: list[str],
+    current_day: str | None,
+) -> dict[str, str]:
+    cleaned_lines = [
+        _clean_fragment(line.lstrip("●■").strip())
+        for line in lines
+        if _clean_fragment(line.lstrip("●■").strip())
+    ]
+    if not current_day or not cleaned_lines:
+        return {}
+    block_text = "\n".join(cleaned_lines)
+    if "休止中" in block_text:
+        return {}
+    time_line = next((line for line in cleaned_lines if TIME_RE.search(line)), "")
+    if not time_line:
+        return {}
+    payload: dict[str, str] = {
+        "day": current_day,
+        "time": _normalize_japanese_time_from_line(time_line),
+    }
+    first_time_index = cleaned_lines.index(time_line)
+    leading = cleaned_lines[:first_time_index]
+    if leading:
+        payload["name"] = _japanese_block_name(leading)
+        if len(leading) > 1 and leading[0] != payload["name"]:
+            payload["city"] = leading[0]
+
+    detail_lines = cleaned_lines[first_time_index + 1 :]
+    _merge_japanese_detail_line(payload, _clean_japanese_time_remainder(time_line))
+    for detail in detail_lines:
+        _merge_japanese_detail_line(payload, detail)
+    return _without_empty(payload)
+
+
+def _japanese_block_name(lines: list[str]) -> str:
+    group = next(
+        (
+            line
+            for line in lines[1:]
+            if "グループ" in line or re.search(r"\bG\)?$", line, flags=re.IGNORECASE)
+        ),
+        "",
+    )
+    return group or lines[-1] or lines[0]
+
+
+def _normalize_japanese_time_from_line(line: str) -> str:
+    time = _first_time_match(line)
+    if not time:
+        return ""
+    normalized = _normalize_extracted_time(time)
+    if "午後" not in line:
+        return normalized
+    match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", normalized)
+    if match is None:
+        return normalized
+    hour = int(match.group(1))
+    if hour < 12:
+        hour += 12
+    return f"{hour}:{match.group(2)}"
+
+
+def _clean_japanese_time_remainder(line: str) -> str:
+    cleaned = _clean_fragment(TIME_RE.sub("", line, count=1))
+    cleaned = re.sub(r"^(?:時間|午前|午後)\s*[：:]?\s*", "", cleaned)
+    cleaned = re.sub(r"^[〜～\-–—]\s*\d{1,2}(?:[:：]\d{2})?.*$", "", cleaned)
+    return _clean_fragment(cleaned)
+
+
+def _merge_japanese_detail_line(payload: dict[str, str], line: str) -> None:
+    cleaned = _clean_fragment(line)
+    if not cleaned or cleaned in {"アクセス", "地図"}:
+        return
+    lowered = cleaned.lower()
+    if (url := _first_url(cleaned)) and (online_url := _meeting_url_or_none(url)):
+        payload.setdefault("online_url", online_url)
+    if lowered.startswith(("info", "tel")) or cleaned.startswith(("ID", "パス", "pass")):
+        existing = payload.get("phone_join_info", "")
+        payload["phone_join_info"] = " ".join(part for part in (existing, cleaned) if part)
+        return
+    label_match = re.match(
+        r"^(?P<label>会場|場所|住所|形式|最寄(?:り駅)?|備考)\s*[：:]\s*(?P<value>.+)$",
+        cleaned,
+    )
+    if label_match is not None:
+        label = label_match.group("label")
+        value = _clean_fragment(label_match.group("value"))
+        if not value:
+            return
+        if label == "会場":
+            payload.setdefault("venue_name", value)
+            return
+        if label in {"場所", "住所"}:
+            if _looks_like_japanese_address_line(value) or any(char.isdigit() for char in value):
+                payload.setdefault("address_line1", value)
+            else:
+                payload.setdefault("venue_name", value)
+            return
+        if label == "形式":
+            payload.setdefault("formats", value)
+            return
+        payload.setdefault("notes", value)
+        return
+    if _looks_like_format_text(cleaned) or any(
+        term in cleaned for term in ("オープン", "クローズド")
+    ):
+        payload.setdefault("formats", cleaned)
+        return
+    if _looks_like_japanese_address_line(cleaned) and any(char.isdigit() for char in cleaned):
+        payload.setdefault("address_line1", cleaned)
+        return
+    if not payload.get("venue_name") and _contains_cjk(cleaned):
+        payload["venue_name"] = cleaned
+
+
 def _clean_inline_schedule_tail(text: str) -> str:
     cleaned = re.sub(r"^\s*\([^)]*\)\s*", "", text).strip(TEXT_STRIP_CHARS)
     cleaned = re.sub(r"\bse kart nederst\b", "", cleaned, flags=re.IGNORECASE)
@@ -1141,6 +1838,527 @@ def _extract_sequenced_text_meetings(
         )
         row_index += 1
     return meetings
+
+
+def _extract_pdf_text_meetings(
+    soup: BeautifulSoup,
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    if soup.select_one("[data-pdf-text-fallback]") is None:
+        return []
+    lines = [_pdf_text_line(line) for line in _rendered_text_lines(soup)]
+    lines = [line for line in lines if line and not _is_pdf_non_meeting_line(line)]
+    if japanese_meetings := _extract_japanese_pdf_text_meetings(
+        lines,
+        source_page_url,
+        page_score,
+    ):
+        return japanese_meetings
+    meetings: list[ExtractedMeeting] = []
+    current_day: str | None = None
+    pending_name: str | None = None
+    pending_address: str | None = None
+    row_index = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if day := _pdf_day_heading(line):
+            current_day = day
+            pending_name = None
+            pending_address = None
+            index += 1
+            continue
+        start_payloads = _pdf_start_payloads(line, current_day, pending_name, pending_address)
+        if not start_payloads:
+            if _looks_like_address_fallback(line):
+                pending_address = line
+            elif _looks_like_pdf_pending_name(line):
+                if pending_name and not pending_address:
+                    pending_address = pending_name
+                pending_name = line
+            index += 1
+            continue
+        next_index = _next_pdf_meeting_index(lines, index + 1, current_day)
+        details = lines[index + 1 : next_index]
+        repeated_structure = len(start_payloads) > 1 or len(meetings) > 0
+        for payload in start_payloads:
+            enriched = dict(payload)
+            for detail in details:
+                _merge_pdf_detail_line(enriched, detail)
+            enriched = _without_empty(enriched)
+            if not _looks_like_meeting_payload(enriched):
+                continue
+            confidence, signals = confidence_for_payload(
+                enriched,
+                method="heuristic_pdf_text",
+                page_score=max(page_score, 0.75),
+                repeated_structure=repeated_structure,
+            )
+            meetings.append(
+                ExtractedMeeting(
+                    payload={**enriched, "row_index": row_index},
+                    method="heuristic_pdf_text",
+                    confidence=max(confidence, 0.75),
+                    source_page_url=source_page_url,
+                    signals=signals,
+                    selector_hint="pdf_text",
+                )
+            )
+            row_index += 1
+        if meetings:
+            pending_name = None
+            pending_address = None
+        index = max(next_index, index + 1)
+    return meetings
+
+
+def _extract_japanese_pdf_text_meetings(
+    lines: list[str],
+    source_page_url: str,
+    page_score: float,
+) -> list[ExtractedMeeting]:
+    if not any(_contains_cjk(line) for line in lines):
+        return []
+    meetings: list[ExtractedMeeting] = []
+    current_day: str | None = None
+    row_index = 0
+    for index, line in enumerate(lines):
+        if day := _pdf_day_heading(line):
+            current_day = day
+            continue
+        if re.fullmatch(r"[０-９0-9]+\s*[Pp]?", line):
+            continue
+        time_match = _first_time_match_with_span(line)
+        if time_match is None or current_day is None:
+            continue
+        raw_time, _time_start, time_end = time_match
+        name = _clean_meeting_name_line(line[time_end:])
+        if re.fullmatch(
+            r"(?:to|-|–|—|〜|～)?\s*\d{1,2}(?::\d{2})?",
+            name,
+            flags=re.IGNORECASE,
+        ):
+            name = ""
+        previous = _japanese_pdf_context_before_time(lines, index)
+        venue = previous[-2] if len(previous) >= 2 else ""
+        name = name or (previous[-1] if previous else "")
+        next_details = _japanese_pdf_context_after_time(lines, index + 1)
+        address = next(
+            (detail for detail in next_details if _looks_like_pdf_address_line(detail)),
+            "",
+        )
+        if not venue:
+            venue = next(
+                (
+                    detail
+                    for detail in next_details
+                    if _looks_like_pdf_pending_name(detail)
+                    and not _looks_like_pdf_address_line(detail)
+                ),
+                "",
+            )
+        payload = _without_empty(
+            {
+                "day": current_day,
+                "time": _normalize_extracted_time(raw_time),
+                "name": name,
+                "venue_name": venue,
+                "address_line1": address,
+            }
+        )
+        if not _looks_like_meeting_payload(payload):
+            continue
+        confidence, signals = confidence_for_payload(
+            payload,
+            method="heuristic_japanese_pdf_text",
+            page_score=max(page_score, 0.75),
+            repeated_structure=len(meetings) > 0,
+        )
+        meetings.append(
+            ExtractedMeeting(
+                payload={**payload, "row_index": row_index},
+                method="heuristic_japanese_pdf_text",
+                confidence=max(confidence, 0.75),
+                source_page_url=source_page_url,
+                signals=signals,
+                selector_hint="japanese_pdf_text",
+            )
+        )
+        row_index += 1
+    return meetings
+
+
+def _japanese_pdf_context_before_time(lines: list[str], time_index: int) -> list[str]:
+    context: list[str] = []
+    for index in range(time_index - 1, max(-1, time_index - 8), -1):
+        line = lines[index]
+        if _pdf_day_heading(line) or _first_time_match_with_span(line):
+            break
+        if _looks_like_japanese_pdf_context_line(line):
+            context.append(line)
+    return list(reversed(context[-2:]))
+
+
+def _japanese_pdf_context_after_time(lines: list[str], start_index: int) -> list[str]:
+    context: list[str] = []
+    for index in range(start_index, min(len(lines), start_index + 10)):
+        line = lines[index]
+        if _pdf_day_heading(line) or _first_time_match_with_span(line):
+            break
+        if _looks_like_japanese_pdf_context_line(line):
+            context.append(line)
+    return context
+
+
+def _looks_like_japanese_pdf_context_line(line: str) -> bool:
+    if _is_pdf_non_meeting_line(line) or _looks_like_format_text(line):
+        return False
+    if re.fullmatch(r"[０-９0-9]+\s*[Pp]?", line):
+        return False
+    return _looks_like_pdf_address_line(line) or _looks_like_pdf_pending_name(line)
+
+
+def _pdf_text_line(line: str) -> str:
+    cleaned = _clean_fragment(line)
+    cleaned = re.sub(r"[_]{3,}", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip(TEXT_STRIP_CHARS)
+
+
+def _is_pdf_non_meeting_line(line: str) -> bool:
+    lowered = line.lower()
+    if _is_non_meeting_source_text(line) or _is_non_meeting_detail_line(line):
+        return True
+    return any(
+        phrase in lowered
+        for phrase in (
+            "who is an addict",
+            "each month",
+            "basic text",
+            "phone numbers",
+            "for meeting info by phone",
+            "call 1.",
+            "meeting list",
+            "helpline",
+            "help line",
+            "www.",
+            "na.org",
+            "area service committee",
+            "public relations",
+            "literature orders",
+            "newsletter",
+            "contributions",
+            "changes to the meeting list",
+            "legend",
+            "open addicts only",
+            "closed, addicts only",
+            "wheel chair access",
+            "one addict",
+            "helping",
+            "parallel",
+        )
+    )
+
+
+def _pdf_day_heading(line: str) -> str | None:
+    cleaned = line.rstrip(":").strip()
+    day = _day_from_schedule_line(cleaned)
+    if day is None or TIME_RE.search(cleaned):
+        return None
+    remaining = DAY_RE.sub("", cleaned).strip(" :/-–—")
+    if remaining and len(remaining.split()) > 1:
+        return None
+    return day
+
+
+def _pdf_start_payloads(
+    line: str,
+    current_day: str | None,
+    pending_name: str | None,
+    pending_address: str | None,
+) -> list[dict[str, Any]]:
+    time_match = _first_time_match_with_span(line)
+    if time_match is None:
+        return []
+    raw_time, time_start, time_end = time_match
+    days = _days_from_schedule_text(line) or ([current_day] if current_day else [])
+    if not days:
+        return []
+    semicolon_payloads = _pdf_semicolon_start_payloads(
+        line,
+        days,
+        raw_time,
+        time_start,
+        time_end,
+    )
+    if semicolon_payloads:
+        return semicolon_payloads
+    prefix = _clean_fragment(line[:time_start])
+    suffix = _clean_fragment(line[time_end:])
+    if re.fullmatch(
+        r"(?:to|-|–|—|〜|～)?\s*(?:\d{1,2}(?::|\.|;)?\d{0,2})\s*"
+        r"(?:am|pm|a|p|a\.m\.|p\.m\.)?",
+        suffix,
+        flags=re.IGNORECASE,
+    ):
+        suffix = ""
+    clean_prefix = _clean_pdf_start_prefix(prefix)
+    name = _clean_meeting_name_line(suffix)
+    city = ""
+    if clean_prefix:
+        if _looks_like_pdf_city_prefix(clean_prefix) and name:
+            city = clean_prefix.title()
+    elif not name:
+        name = _clean_meeting_name_line(clean_prefix)
+    if name == "@":
+        name = ""
+    name = name or pending_name or ""
+    payloads: list[dict[str, Any]] = []
+    for day in days:
+        payload: dict[str, Any] = {
+            "day": day,
+            "time": _normalize_extracted_time(raw_time),
+        }
+        if name:
+            payload["name"] = name
+        if city:
+            payload["city"] = city
+        if pending_address and not _looks_like_pdf_address_embedded_in_name(name):
+            if _looks_like_pdf_address_line(pending_address):
+                payload["address_line1"] = pending_address
+            else:
+                payload["venue_name"] = pending_address
+        payloads.append(payload)
+    return payloads
+
+
+def _pdf_semicolon_start_payloads(
+    line: str,
+    days: list[str],
+    raw_time: str,
+    time_start: int,
+    time_end: int,
+) -> list[dict[str, Any]]:
+    before_time = line[:time_start]
+    if ";" not in before_time:
+        return []
+    name = _clean_meeting_name_line(before_time.rsplit(";", 1)[0])
+    if not name:
+        return []
+    location = _clean_fragment(line[time_end:].lstrip(", "))
+    payloads: list[dict[str, Any]] = []
+    for day in days:
+        payload: dict[str, Any] = {
+            "day": day,
+            "time": _normalize_extracted_time(raw_time),
+            "name": name,
+        }
+        if location:
+            if _looks_like_pdf_address_line(location):
+                payload["address_line1"] = location
+            else:
+                payload["venue_name"] = location
+        payloads.append(payload)
+    return payloads
+
+
+def _first_time_match_with_span(text: str) -> tuple[str, int, int] | None:
+    range_match = TIME_RANGE_TRAILING_MARKER_RE.search(text)
+    if range_match is not None:
+        return (
+            f"{range_match.group('start')}{range_match.group('marker')}",
+            range_match.start(),
+            range_match.end(),
+        )
+    match = TIME_RE.search(text)
+    if match is None:
+        return None
+    return match.group(0), match.start(), match.end()
+
+
+def _clean_pdf_start_prefix(prefix: str) -> str:
+    cleaned = DAY_RE.sub(" ", prefix)
+    cleaned = re.sub(r"\b(?:and|&|to|thru|through)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip(TEXT_STRIP_CHARS + ":")
+
+
+def _looks_like_pdf_city_prefix(prefix: str) -> bool:
+    if len(prefix.split()) > 3:
+        return False
+    letters = [char for char in prefix if char.isalpha()]
+    return bool(letters) and sum(char.isupper() for char in letters) >= max(2, len(letters) - 2)
+
+
+def _looks_like_pdf_address_embedded_in_name(name: str) -> bool:
+    return bool(name and _looks_like_address_fallback(name))
+
+
+def _next_pdf_meeting_index(lines: list[str], start_index: int, current_day: str | None) -> int:
+    for index in range(start_index, len(lines)):
+        line = lines[index]
+        if _pdf_day_heading(line) or _pdf_start_payloads(line, current_day, None, None):
+            return index
+    return len(lines)
+
+
+def _looks_like_pdf_pending_name(line: str) -> bool:
+    lowered = line.lower()
+    if len(line) > 90 or (len(line) < 3 and not _contains_cjk(line)):
+        return False
+    if _looks_like_pdf_address_line(line) or _looks_like_pdf_postal_city_line(line):
+        return False
+    if TIME_RE.search(line) or _day_from_schedule_line(line):
+        return False
+    if any(
+        term in lowered
+        for term in (
+            "contact:",
+            "phone",
+            "email",
+            "http",
+            "closed mtg",
+            "open",
+            "wheelchair",
+            "accessible",
+            "service",
+            "オープン",
+            "クローズド",
+            "本人のみ",
+        )
+    ):
+        return False
+    return any(char.isalpha() for char in line)
+
+
+def _merge_pdf_detail_line(payload: dict[str, Any], line: str) -> None:
+    lowered = line.lower()
+    if _is_pdf_non_meeting_line(line):
+        return
+    if _pdf_day_heading(line) or _pdf_start_payloads(line, None, None, None):
+        return
+    if lowered.startswith(("contact:", "phone:", "tel:")) or _is_connection_line(line):
+        existing = str(payload.get("phone_join_info") or "")
+        payload["phone_join_info"] = " ".join(part for part in (existing, line) if part)
+        return
+    if not payload.get("name") and (parsed := _pdf_name_location_line(line)):
+        payload.update(parsed)
+        return
+    if not payload.get("name") and _looks_like_pdf_pending_name(line):
+        payload["name"] = _clean_meeting_name_line(line)
+        return
+    if _looks_like_pdf_address_line(line):
+        if not payload.get("address_line1"):
+            payload["address_line1"] = line
+        return
+    if _looks_like_format_text(line):
+        existing = str(payload.get("formats") or "")
+        payload["formats"] = ", ".join(part for part in (existing, line) if part).strip(", ")
+        return
+    if not payload.get("city") and _looks_like_pdf_postal_city_line(line):
+        payload["city"] = line
+        return
+    if (
+        payload.get("address_line1")
+        and not payload.get("city")
+        and _looks_like_postal_city_line(line)
+    ):
+        payload["city"] = line
+        return
+    if not payload.get("venue_name") and _looks_like_pdf_pending_name(line):
+        payload["venue_name"] = _clean_fragment(line)
+        return
+    if not payload.get("city") and _looks_like_city_line(line):
+        payload["city"] = line
+
+
+def _pdf_name_location_line(line: str) -> dict[str, str]:
+    if "," not in line:
+        return {}
+    split_at = _first_comma_outside_parentheses(line)
+    if split_at is None:
+        return {}
+    name, rest = line[:split_at], line[split_at + 1 :]
+    name = _clean_meeting_name_line(re.sub(r"\([^)]{1,30}\)", "", name))
+    rest = _clean_fragment(rest)
+    if not name or not rest:
+        return {}
+    if TIME_RE.search(name) or _day_from_schedule_line(name):
+        return {}
+    if _looks_like_pdf_address_line(name):
+        return {}
+    payload = {"name": name}
+    if _looks_like_pdf_address_line(rest):
+        payload["address_line1"] = rest
+    else:
+        payload["venue_name"] = rest
+    return payload
+
+
+def _first_comma_outside_parentheses(line: str) -> int | None:
+    depth = 0
+    for index, char in enumerate(line):
+        if char == "(":
+            depth += 1
+        elif char == ")" and depth:
+            depth -= 1
+        elif char == "," and depth == 0:
+            return index
+    return None
+
+
+def _looks_like_pdf_address_line(line: str) -> bool:
+    if _looks_like_japanese_address_line(line):
+        return True
+    if not _looks_like_address_fallback(line):
+        return False
+    if ADDRESS_RE.search(line):
+        rest = line.split(maxsplit=1)[1] if len(line.split(maxsplit=1)) > 1 else ""
+        ordinal_prefix = re.match(r"\d+(?:st|nd|rd|th)\s", line, flags=re.IGNORECASE)
+        street_suffix = re.search(
+            r"\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|drive|dr\.?|"
+            r"lane|ln\.?|way|court|ct\.?|place|pl\.?|parkway|pkwy\.?)\b",
+            rest,
+            flags=re.IGNORECASE,
+        )
+        return not (ordinal_prefix and not street_suffix)
+    lowered = line.lower()
+    return bool(
+        re.search(
+            r"\b\d+\s+[A-Za-z0-9'.\s-]{1,80}"
+            r"\b(?:ave|avenue|blvd|boulevard|rd|road|street|dr|drive|ln|lane|way|"
+            r"court|ct|place|pl|pkwy|parkway)\b",
+            lowered,
+        )
+        or re.search(r"\b(?:ca|us|hwy|highway)-?\s*\d+\b", lowered)
+    )
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u3040" <= char <= "\u30ff" or "\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _looks_like_japanese_address_line(line: str) -> bool:
+    if len(line) < 4 or not _contains_cjk(line):
+        return False
+    return bool(
+        re.search(
+            r"(?:都|道|府|県|市|区|町|村|丁目|番地|条|西|東|南|北)\s*\d?",
+            line,
+        )
+    )
+
+
+def _looks_like_pdf_postal_city_line(line: str) -> bool:
+    if _looks_like_postal_city_line(line):
+        return True
+    return bool(
+        re.fullmatch(
+            r"[A-Za-z'.\s-]+,?\s+[A-Z]{2}\s+\d{5}(?:-\d{4})?",
+            line.strip(),
+        )
+    )
 
 
 def _extract_rendered_column_text_meetings(
@@ -1543,6 +2761,8 @@ def _day_heading_or_none(text: str) -> str | None:
     cleaned = _clean_fragment(text)
     if len(cleaned) > 32 or TIME_RE.search(cleaned):
         return None
+    if day := _local_day_name_from_text(cleaned):
+        return day
     lowered = cleaned.lower()
     match = DAY_RE.fullmatch(lowered)
     if match is None and lowered.endswith("s"):
@@ -1801,7 +3021,14 @@ def _clean_meeting_name_line(line: str) -> str:
     cleaned = _clean_fragment(line)
     cleaned = cleaned.replace("\u200b", "")
     cleaned = re.sub(r"^(grupa|group)\s+", "", cleaned, flags=re.IGNORECASE)
-    cleaned = cleaned.replace("“", "").replace("”", "").replace("„", "").replace('"', "")
+    cleaned = (
+        cleaned.replace("“", "")
+        .replace("”", "")
+        .replace("„", "")
+        .replace("«", "")
+        .replace("»", "")
+        .replace('"', "")
+    )
     cleaned = re.sub(r"\((?:mityng|miting|meeting)[^)]+\)", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(TEXT_STRIP_CHARS)
     return cleaned
@@ -1940,13 +3167,15 @@ def _next_structured_text_meeting_index(lines: list[str], start_index: int) -> i
 
 def _structured_text_day(line: str) -> str:
     cleaned = re.sub(r"^\(\d+\)\s*", "", line).strip()
-    day = _first_match(DAY_RE, cleaned)
-    return day or ""
+    return _day_from_schedule_line(cleaned) or ""
 
 
 def _day_from_schedule_line(line: str) -> str | None:
+    if day := _local_day_name_from_text(line):
+        return day
     if day := _first_match(DAY_RE, line):
-        return day.rstrip("s").title()
+        normalized = _local_day_name(day)
+        return normalized or day.rstrip("s").title()
     match = re.search(
         r"\b(sundays|mondays|tuesdays|wednesdays|thursdays|fridays|saturdays)\b",
         line,
@@ -1955,6 +3184,28 @@ def _day_from_schedule_line(line: str) -> str | None:
     if match is None:
         return None
     return match.group(1).removesuffix("s").title()
+
+
+def _days_from_schedule_text(text: str) -> list[str]:
+    days: list[str] = []
+    seen: set[str] = set()
+    for match in DAY_RE.finditer(text):
+        day = _local_day_name(match.group(0)) or _day_from_schedule_line(match.group(0))
+        if day and day not in seen:
+            days.append(day)
+            seen.add(day)
+    return days
+
+
+def _local_day_name_from_text(text: str) -> str | None:
+    for term in sorted(LOCAL_DAY_NAMES, key=len, reverse=True):
+        if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text, flags=re.IGNORECASE):
+            return LOCAL_DAY_NAMES[term]
+    return None
+
+
+def _local_day_name(day: str) -> str | None:
+    return LOCAL_DAY_NAMES.get(day.strip().lower())
 
 
 def _previous_sequence_name(lines: list[str], schedule_index: int) -> str | None:
@@ -2241,18 +3492,30 @@ def _first_url(text: str) -> str | None:
 def _normalize_extracted_time(time: str) -> str:
     stripped = time.strip()
     lowered = stripped.lower()
-    if lowered == "12 noon":
+    if lowered in {"noon", "12 noon"}:
         return "12:00 pm"
     if lowered == "midnight":
         return "12:00 am"
     stripped = re.sub(r"^kl\.?\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"^([01]?\d|2[0-3])h$", r"\1:00", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"(?<=\d)\.(?=\d{2}\b)", ":", stripped)
+    stripped = re.sub(r"(?<=\d)\s*a\b", "am", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"(?<=\d)\s*p\b", "pm", stripped, flags=re.IGNORECASE)
     stripped = re.sub(
-        r"\s*(?:to|-|–|—)\s*\d{1,2}(?:(?::|\.)\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?\s*$",
+        r"\s*(?:to|-|–|—|〜|～)\s*\d{1,2}(?:(?::|\.)\d{2})?\s*"
+        r"(?:am|pm|a\.m\.|p\.m\.)?\s*$",
         "",
         stripped,
         flags=re.IGNORECASE,
     )
     normalized = re.sub(r"\b([ap])\.m\.?\b", r"\1m", stripped, flags=re.IGNORECASE)
+    twenty_four_hour_marker = re.fullmatch(
+        r"([01]?\d|2[0-3]):([0-5]\d)\s*(am|pm)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if twenty_four_hour_marker is not None and int(twenty_four_hour_marker.group(1)) > 12:
+        return f"{int(twenty_four_hour_marker.group(1))}:{twenty_four_hour_marker.group(2)}"
     normalized = re.sub(
         r"(?<=\d)(?:\.|;)(?=\d{2}\s*(?:am|pm)?\b)",
         ":",

@@ -71,6 +71,7 @@ class SourceProbeClassifier:
                     source,
                     adapter_type=AdapterType.MEETING_GUIDE,
                     source_type=SourceType.MEETING_FEED,
+                    requires_browser=False,
                     config_updates={"meeting_guide_feed_url": str(home_response.url)},
                     reason="source URL returned Meeting Guide JSON",
                 )
@@ -79,6 +80,7 @@ class SourceProbeClassifier:
                     source,
                     adapter_type=AdapterType.BMLT,
                     source_type=SourceType.MEETING_FEED,
+                    requires_browser=False,
                     config_updates={"bmlt_search_endpoint": str(home_response.url)},
                     reason="source URL returned BMLT JSON",
                 )
@@ -90,6 +92,7 @@ class SourceProbeClassifier:
                         source,
                         adapter_type=AdapterType.MEETING_GUIDE,
                         source_type=SourceType.MEETING_FEED,
+                        requires_browser=False,
                         config_updates={"meeting_guide_feed_url": url},
                         reason="discovered Meeting Guide JSON feed",
                     )
@@ -101,6 +104,7 @@ class SourceProbeClassifier:
                         source,
                         adapter_type=AdapterType.BMLT,
                         source_type=SourceType.MEETING_FEED,
+                        requires_browser=False,
                         config_updates={"bmlt_search_endpoint": endpoint},
                         reason="discovered BMLT JSON endpoint",
                     )
@@ -108,14 +112,16 @@ class SourceProbeClassifier:
             if self._has_meeting_form(html):
                 return self._updated(
                     source,
-                    adapter_type=AdapterType.MANUAL_REVIEW,
-                    reason="meeting search form found; request and selectors need review",
+                    adapter_type=AdapterType.PLAYWRIGHT_BROWSER,
+                    requires_browser=True,
+                    reason="meeting search form found; browser crawler can interact with it",
                 )
             if self._has_meeting_page(html):
                 return self._updated(
                     source,
-                    adapter_type=AdapterType.MANUAL_REVIEW,
-                    reason="meeting page found; selectors need review",
+                    adapter_type=AdapterType.PLAYWRIGHT_BROWSER,
+                    requires_browser=True,
+                    reason="meeting page found; browser crawler can extract rendered content",
                 )
 
         return self._updated(source, reason="no supported meeting feed detected")
@@ -219,6 +225,7 @@ class SourceProbeClassifier:
         *,
         adapter_type: AdapterType | None = None,
         source_type: SourceType | None = None,
+        requires_browser: bool | None = None,
         config_updates: dict[str, Any] | None = None,
         reason: str,
     ) -> ClassificationResult:
@@ -235,6 +242,9 @@ class SourceProbeClassifier:
             update={
                 "adapter_type": adapter_type or source.adapter_type,
                 "source_type": source_type or source.source_type,
+                "requires_browser": (
+                    source.requires_browser if requires_browser is None else requires_browser
+                ),
                 "config": config,
             }
         )

@@ -1,4 +1,4 @@
-from app.scraping.interactions import _search_seed_for_source
+from app.scraping.interactions import _button_selectors, _search_seed_for_source
 from app.sources.registry import Source, SourceType
 
 
@@ -27,3 +27,11 @@ def test_search_seed_extracts_city_like_text_from_source_metadata_address() -> N
     )
 
     assert _search_seed_for_source(source) == "Belize City"
+
+
+def test_heuristic_button_selectors_do_not_click_navigation_anchors() -> None:
+    selectors = _button_selectors()
+
+    assert "[aria-expanded='false']" not in selectors
+    assert "button[aria-expanded='false']" in selectors
+    assert "[role='button'][aria-expanded='false']" in selectors
