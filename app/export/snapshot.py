@@ -4,9 +4,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.normalize.canonical import CanonicalMeetingCandidate, Snapshot, SnapshotMeeting
+from app.normalize.location_quality import normalize_candidate_location
 
 
 def build_snapshot(candidates: list[CanonicalMeetingCandidate]) -> Snapshot:
+    normalized_candidates = [normalize_candidate_location(candidate) for candidate in candidates]
     return Snapshot(
         generated_at=datetime.now(UTC),
         meetings=[
@@ -35,7 +37,7 @@ def build_snapshot(candidates: list[CanonicalMeetingCandidate]) -> Snapshot:
                 occurrences=candidate.occurrences,
                 last_verified_at=candidate.last_verified_at,
             )
-            for candidate in candidates
+            for candidate in normalized_candidates
         ],
     )
 

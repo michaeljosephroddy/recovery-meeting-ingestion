@@ -1,4 +1,6 @@
 import asyncio
+import json
+from collections import Counter
 from pathlib import Path
 from typing import Annotated, Any, Protocol, runtime_checkable
 
@@ -13,6 +15,8 @@ from app.export.snapshot import write_snapshot as write_snapshot_file
 from app.ingest import IngestResult
 from app.ingest import ingest_source as run_ingest_source
 from app.logging import configure_logging
+from app.normalize.canonical import Snapshot
+from app.normalize.location_quality import audit_snapshot_meetings
 from app.review.flags import flag_source_drop
 from app.scraping.artifact_import import (
     import_artifact_summary,
@@ -759,6 +763,42 @@ def export_snapshot(dry_run: bool = True) -> None:
         snapshot_id = "not recorded"
     console.print(f"output: {path}")
     console.print(f"snapshot_id: {snapshot_id}")
+
+
+@app.command("audit-snapshot-quality")
+def audit_snapshot_quality(
+    snapshot_path: Annotated[Path, typer.Argument(help="Snapshot JSON file to audit.")],
+    examples: Annotated[
+        int,
+        typer.Option(help="Maximum examples to print for each issue type."),
+    ] = 5,
+    top_sources: Annotated[
+        int,
+        typer.Option(help="Maximum source IDs to print for each aggregate list."),
+    ] = 20,
+) -> None:
+    snapshot = Snapshot.model_validate_json(snapshot_path.read_text(encoding="utf-8"))
+    audit = audit_snapshot_meetings(snapshot.meetings, max_examples_per_issue=examples)
+
+    console.print(f"snapshot: {snapshot_path}")
+    console.print(f"total_meetings: {audit.total_meetings}")
+    _print_counter("country_aliases", audit.country_aliases, top_sources)
+    _print_counter("issue_counts", audit.issue_counts, top_sources)
+    _print_counter("issue_counts_by_fellowship", audit.issue_counts_by_fellowship, top_sources)
+    _print_counter("issue_counts_by_source", audit.issue_counts_by_source, top_sources)
+    for issue_code, issue_examples in sorted(audit.examples.items()):
+        console.print(f"{issue_code}_examples:")
+        for example in issue_examples:
+            console.print(json.dumps(example.as_dict(), ensure_ascii=False, sort_keys=True))
+
+
+def _print_counter(label: str, counter: Counter[str], limit: int) -> None:
+    console.print(f"{label}:")
+    if not counter:
+        console.print("- none")
+        return
+    for key, count in counter.most_common(limit):
+        console.print(f"- {count} {key}")
 
 
 @app.command("cleanup-timezones")

@@ -13,3 +13,4 @@ snapshots/
 scrape_artifacts/
 playwright-report/
 test-results/
+logs/

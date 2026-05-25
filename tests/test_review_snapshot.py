@@ -88,3 +88,27 @@ def test_snapshot_excludes_raw_payloads() -> None:
 
     assert "payload" not in str(dumped)
     assert dumped["meetings"][0]["source_record_id"] == "daily-reflection"
+
+
+def test_snapshot_normalizes_location_country_before_export() -> None:
+    candidate = CanonicalMeetingCandidate(
+        fellowship="aa",
+        source_id="aa-c592e77d0762",
+        source_record_id="9619",
+        source_url="https://example.org/meetings.json",
+        name="World's End (UK)",
+        meeting_type="hybrid",
+        venue_name="Virtual Meeting (Hosted by CAIG)",
+        address_line1="London, UK",
+        region="Chelsea London, UK",
+        country="United States",
+        occurrences=[
+            MeetingOccurrence(day_of_week=1, start_time_local="19:30", timezone="Europe/London")
+        ],
+    )
+
+    snapshot = build_snapshot([candidate])
+
+    assert snapshot.meetings[0].country == "United Kingdom"
+    assert snapshot.meetings[0].address_line1 == "London"
+    assert snapshot.meetings[0].region == "Chelsea London"
