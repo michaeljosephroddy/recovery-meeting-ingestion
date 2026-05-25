@@ -237,6 +237,10 @@ The user-visible result is visible by running `snapshots/latest.json` through `j
 
 Discovery repair, classifier changes, a controlled concurrent scrape batch, full NA classification, full concurrent scrape/import, targeted concurrent failed/zero retries, BMLT data-script recovery, classed-row and localized-table parser recovery, meeting-list PDF recovery, Japanese PDF and paragraph-page recovery, iframe/embed recovery, source-replacement recovery, source-ID filtered retry buckets, directory-link protection for generic search forms, Japan area branch scoping, repeatable zero-source audit, broad-area quarantine, timezone cleanup, source-specific direct BMLT recovery, linked current-list PDF recovery, encoded PDF path recovery, final source-specific parser recovery, and snapshot export are implemented and validated. NA active meetings increased from 2,681 at baseline to 74,325, and active NA source coverage increased from 6 sources to 682 sources. `snapshots/latest.json` now contains 173,244 total active meetings, and the latest export is `snapshots/meetings-2026-05-25T113118Z.json` with `blocked_by_review=0`. Remaining NA follow-up work is limited to unrecoverable/manual or broad-risk sources documented in `docs/na_completion_audit_2026-05-25.md`: three broad regional duplicate-risk current-list/table sources and four manual/stale/blocked sources.
 
+The remaining 7 audit items have been dispositioned for publication. The broad-risk
+sources are intentionally excluded from area import, and the manual items are tracked
+in `docs/na_manual_followups_2026-05-25.md`.
+
 ## Context and Orientation
 
 This repository is `/home/michaelroddy/repos/recovery-meeting-ingestion`. It is a Python service that discovers recovery meeting sources, scrapes source websites, normalizes scraped rows into canonical meetings, stores review flags, and exports `snapshots/latest.json` for SoberSpace.

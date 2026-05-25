@@ -8,6 +8,14 @@ Remaining audited candidates: 7
 - source_specific_manual_or_parser_followup: 4
 - broad_or_duplicate_risk: 3
 
+## Final Disposition
+
+The remaining 7 items are not publication blockers. The 3 broad/duplicate-risk sources
+are intentionally excluded from automated import because the currently reachable data is
+regional or statewide and would create duplicate or wrongly owned meetings. The 4 manual
+items require a human-provided current schedule URL, feed, or access path before another
+automated import attempt is justified.
+
 ## Original Audit Buckets
 - possible_missed_structured_feed: 18
 - possible_pdf_or_printable: 8
@@ -46,12 +54,15 @@ Remaining audited candidates: 7
 - `na-d4eceee5b4d4` Thailand: Thailand Region - implemented index-to-area-page schedule parsing across Thailand meeting pages; persisted 38 active records with no review flags.
 - `na-494e4e542045` Belarus: Belarus Area - implemented Russian schedule table parsing across group pages; persisted 98 active records with no review flags.
 
-## Evidence
+## Intentionally Excluded Broad-Risk Sources
 
 - `na-1cf592320452` broad_or_duplicate_risk (possible_missed_structured_feed) - United States / South Carolina: South Coastal Area (Greater Southern Charleston) - https://www.crna.org/area-service-committees/south-coastal-area-meeting-schedule/ - diagnostic extracted a regional-scale table; broad-area guard prevented import
+- `na-1fedb2223571` broad_or_duplicate_risk (possible_missed_structured_feed) - United States / Colorado: Bringing Freedom East Area (Sterling, Yuma) - https://nacolorado.org/meetings/ - current-list recovery reaches a 240-row Colorado regional PDF, not an area-scoped list; broad-area guard prevents import
+- `na-9a13a07d619f` broad_or_duplicate_risk (possible_missed_structured_feed) - United States / Florida: River Coast Area (Hernando County) - https://rivercoastareana.org/ - current-list recovery reaches the 460-row Florida Region PDF covering Florida, Bermuda, and Trinidad and Tobago; broad-area guard prevents import
+
+## Manual Follow-Up Sources
+
 - `na-98fad1257a15` source_specific_manual_or_parser_followup (parser_gap_candidate) - United Kingdom / England: UK Farsi Groups Area - https://www.ukna.org/ - meetings/online subdomains return Cloudflare challenge pages; accessible UKNA home page does not expose a Farsi/Persian feed or link
 - `na-5ae7212e49ca` source_specific_manual_or_parser_followup (possible_embed_or_calendar) - Trinidad & Tobago: Trinidad and Tobago Area - https://naservicestrinidad.webstarts.com/products.html - page exposes a Google My Maps embed with meeting places but no visible schedule; old My Maps KML endpoint returned 404, so this remains manual/location-only until a schedule source is found
 - `na-287fa3467f36` source_specific_manual_or_parser_followup (possible_missed_structured_feed) - Canada / Quebec: Montreal English Area - https://www.eanamontreal.org/meetings1 - retried after current fixes and still returned zero
-- `na-1fedb2223571` broad_or_duplicate_risk (possible_missed_structured_feed) - United States / Colorado: Bringing Freedom East Area (Sterling, Yuma) - https://nacolorado.org/meetings/ - current-list recovery reaches a 240-row Colorado regional PDF, not an area-scoped list; broad-area guard prevents import
-- `na-9a13a07d619f` broad_or_duplicate_risk (possible_missed_structured_feed) - United States / Florida: River Coast Area (Hernando County) - https://rivercoastareana.org/ - current-list recovery reaches the 460-row Florida Region PDF covering Florida, Bermuda, and Trinidad and Tobago; broad-area guard prevents import
 - `na-800d03d9c194` source_specific_manual_or_parser_followup (possible_missed_structured_feed) - United States / Massachusetts: Western Massachusetts Area - https://westernmassna.org/meetings/ - retried after current fixes and still returned zero
