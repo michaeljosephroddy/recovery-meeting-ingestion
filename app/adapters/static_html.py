@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from typing import Any
 
 import httpx
@@ -108,6 +109,24 @@ AUSTRALIA_REGION_ABBREVIATIONS = {
     for key in AUSTRALIA_REGION_TIMEZONES
     if len(key) <= 3
 }
+COUNTRY_ALIASES = {
+    "england": "United Kingdom",
+    "great britain": "United Kingdom",
+    "gb": "United Kingdom",
+    "uk": "United Kingdom",
+    "u.k.": "United Kingdom",
+    "united kingdom": "United Kingdom",
+    "wielka brytania": "United Kingdom",
+    "wielkiej brytanii": "United Kingdom",
+}
+UK_POSTCODE_RE = re.compile(
+    r"\b(?:GIR\s*0AA|[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b",
+    flags=re.IGNORECASE,
+)
+LONDON_POSTCODE_ADDRESS_RE = re.compile(
+    r"\b(?:london|londyn)\s+(?:E|EC|N|NW|SE|SW|W|WC)\d[A-Z\d]?\b",
+    flags=re.IGNORECASE,
+)
 
 
 class StaticHtmlAdapter:
@@ -155,23 +174,43 @@ class StaticHtmlAdapter:
         days = normalize_days(_string(payload.get("day")))
         start = parse_time(_string(payload.get("time")))
         address_line1 = _string(payload.get("address_line1") or payload.get("address"))
-        country = _string(payload.get("country")) or self.source.country
+        payload_country = _canonical_country(_string(payload.get("country")))
+        source_country = _canonical_country(self.source.country)
         inferred_country, inferred_region = _country_region_from_address(
             address_line1,
-            country_hint=country,
+            country_hint=payload_country or source_country,
         )
-        region = _string(payload.get("region")) or self.source.region
+        country = inferred_country or payload_country or source_country
+        region = _normalized_region(_string(payload.get("region")) or self.source.region)
         payload_timezone = _string(payload.get("timezone"))
+        inferred_country_overrides_source = bool(
+            inferred_country
+            and source_country
+            and inferred_country.casefold() != source_country.casefold()
+        )
+        inferred_timezone = (
+            timezone_for_country_region(country, region)
+            or timezone_for_country_region(country, inferred_region)
+        )
         timezone = (
             (payload_timezone if payload_timezone != "UTC" else None)
+            or (inferred_timezone if inferred_country_overrides_source else None)
             or self.source.config.get("timezone")
             or timezone_for_country_region(country, region)
             or timezone_for_country_region(inferred_country, region)
             or timezone_for_country_region(inferred_country, inferred_region)
             or "UTC"
         )
-        country = country or inferred_country
-        region = region or self.source.region or inferred_region
+        region = region or _normalized_region(self.source.region) or inferred_region
+        city = (
+            _string(payload.get("city"))
+            or _string(self.source.config.get("city"))
+            or _city_from_location_text(
+                _string(payload.get("venue_name")),
+                address_line1,
+                country,
+            )
+        )
         occurrences: list[MeetingOccurrence] = []
         if days and start is not None:
             end = parse_time(_string(payload.get("end_time")))
@@ -210,7 +249,7 @@ class StaticHtmlAdapter:
             meeting_type=meeting_type,  # type: ignore[arg-type]
             venue_name=_string(payload.get("venue_name")),
             address_line1=address_line1,
-            city=_string(payload.get("city")) or self.source.config.get("city"),
+            city=city,
             region=region,
             postal_code=_string(payload.get("postal_code")),
             country=country,
@@ -267,12 +306,45 @@ def _country_region_from_address(
 def _country_from_address_parts(parts: list[str]) -> str | None:
     for part in parts:
         normalized = part.casefold()
+        if canonical := COUNTRY_ALIASES.get(normalized):
+            return canonical
         if normalized in {"us", "usa", "united states", "united states of america"}:
             return "United States"
         if normalized in COUNTRY_TIMEZONES:
             return part
+    if any(UK_POSTCODE_RE.search(part) for part in parts):
+        return "United Kingdom"
     if any(part.title() in US_REGION_TIMEZONES for part in parts):
         return "United States"
+    return None
+
+
+def _canonical_country(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return COUNTRY_ALIASES.get(value.casefold(), value)
+
+
+def _normalized_region(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if COUNTRY_ALIASES.get(value.casefold()):
+        return None
+    return value
+
+
+def _city_from_location_text(
+    venue_name: str | None,
+    address: str | None,
+    country: str | None,
+) -> str | None:
+    if (country or "").casefold() != "united kingdom":
+        return None
+    if venue_name and venue_name.casefold() in {"london", "londyn"}:
+        return "London"
+    text = " ".join(part for part in (venue_name, address) if part)
+    if LONDON_POSTCODE_ADDRESS_RE.search(text):
+        return "London"
     return None
 
 

@@ -187,6 +187,114 @@ def test_static_html_adapter_uses_source_country_hint_for_australian_state() -> 
     assert candidate.occurrences[0].timezone == "Australia/Sydney"
 
 
+def test_static_html_adapter_prefers_address_country_over_source_country() -> None:
+    source = static_source().model_copy(
+        update={
+            "country": "Poland",
+            "region": "Wielka Brytania",
+            "config": {"timezone": "Europe/Warsaw"},
+        }
+    )
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="polish-london-row",
+        source_url=source.url,
+        payload={
+            "name": "ACTION ACTION ACTION",
+            "day": "Monday",
+            "time": "7:00 pm",
+            "venue_name": "Londyn",
+            "address_line1": "2 Windsor Rd, London W5 5PD, Wielka Brytania",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.country == "United Kingdom"
+    assert candidate.city == "London"
+    assert candidate.region is None
+    assert candidate.occurrences[0].timezone == "Europe/London"
+
+
+def test_static_html_adapter_does_not_infer_london_from_street_name() -> None:
+    source = static_source().model_copy(
+        update={
+            "country": "Poland",
+            "region": "Wielka Brytania",
+            "config": {"timezone": "Europe/Warsaw"},
+        }
+    )
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="chelmsford-row",
+        source_url=source.url,
+        payload={
+            "name": "Przyjaciele Billa",
+            "day": "Sunday",
+            "time": "6:00 pm",
+            "venue_name": "Chelmsford",
+            "address_line1": "107 New London Rd, Chelmsford CM2 0PP, Wielka Brytania",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.country == "United Kingdom"
+    assert candidate.city is None
+    assert candidate.occurrences[0].timezone == "Europe/London"
+
+
+def test_static_html_adapter_address_country_override_is_global() -> None:
+    source = static_source().model_copy(
+        update={
+            "country": "United States",
+            "region": "New York",
+            "config": {"timezone": "America/New_York"},
+        }
+    )
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="paris-row",
+        source_url=source.url,
+        payload={
+            "name": "Paris Recovery",
+            "day": "Tuesday",
+            "time": "8:00 pm",
+            "address_line1": "12 Rue de Rivoli, Paris, France",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.country == "France"
+    assert candidate.occurrences[0].timezone == "Europe/Paris"
+
+
+def test_static_html_adapter_infers_united_kingdom_from_postcode() -> None:
+    source = static_source().model_copy(update={"country": None, "config": {}})
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="uk-postcode-row",
+        source_url=source.url,
+        payload={
+            "name": "Keep it Real Mondays",
+            "day": "Monday",
+            "time": "10:30 am",
+            "address_line1": "21D Grant St, Inverness IV3 8BN",
+            "timezone": "UTC",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.country == "United Kingdom"
+    assert candidate.occurrences[0].timezone == "Europe/London"
+
+
 def test_static_html_adapter_infers_timezone_from_region_hint() -> None:
     source = static_source().model_copy(update={"country": None, "config": {}})
     raw = RawMeeting(
