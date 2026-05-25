@@ -367,3 +367,55 @@ async def test_scrape_source_rejects_large_rendered_result_for_na_area(monkeypat
     assert [flag.code for flag in result.ingest.review_flags] == [
         "scrape_broad_area_result"
     ]
+
+
+async def test_scrape_source_rejects_broad_current_meeting_list_for_na_area(monkeypatch) -> None:
+    meetings = [
+        ExtractedMeeting(
+            payload={
+                "name": f"Meeting {index}",
+                "day": "Monday",
+                "time": "7:30 pm",
+                "address_line1": "10 Main Street",
+            },
+            method="heuristic_pdf_text",
+            confidence=0.9,
+            source_page_url="https://region.example.org/?current-meeting-list=1",
+        )
+        for index in range(240)
+    ]
+
+    async def fake_crawl(self) -> ScrapeSourceResult:  # noqa: ANN001
+        return ScrapeSourceResult(
+            source_id=self.source.id,
+            source_url=self.source.url,
+            status="succeeded",
+            pages=[
+                ScrapedPage(
+                    url=self.source.url,
+                    final_url="https://region.example.org/?current-meeting-list=1",
+                    title="Region Meeting List",
+                    html="<html></html>",
+                    extracted=meetings,
+                )
+            ],
+        )
+
+    monkeypatch.setattr("app.scraping.browser_crawler.BrowserCrawler.crawl", fake_crawl)
+    source = Source(
+        id="na-area",
+        fellowship="na",
+        name="Small Area",
+        url="https://example.org/area",
+        source_type=SourceType.LOCAL_SERVICE_BODY,
+        adapter_type=AdapterType.PLAYWRIGHT_BROWSER,
+        config={"metadata": {"na_type": "area"}},
+    )
+
+    result = await scrape_source(source, Settings())
+
+    assert result.ingest.raw_records == []
+    assert result.ingest.candidates == []
+    assert [flag.code for flag in result.ingest.review_flags] == [
+        "scrape_broad_area_result"
+    ]

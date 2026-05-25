@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import parse_qsl, urlparse
 
 from app.adapters.base import AdapterPayloadError, RawMeeting
 from app.config import Settings
@@ -10,6 +11,7 @@ from app.scraping.models import CrawlSettings, ExtractedMeeting, ScrapedPage, Sc
 from app.scraping.na_brazil import fetch_na_brazil_cade_o_grupo_records
 from app.scraping.na_direct_bmlt import fetch_direct_bmlt_records
 from app.scraping.na_redriver import fetch_redriver_records
+from app.scraping.na_source_specific import fetch_source_specific_na_records
 from app.scraping.na_ukraine import fetch_ukraine_foreign_group_records
 from app.scraping.raw_records import raw_records_from_extracted
 from app.scraping.scoring import review_code_for_confidence
@@ -59,6 +61,13 @@ async def scrape_source(
     )
     if ukraine_raw_records is not None:
         return _ingest_direct_raw_records(source, settings, ukraine_raw_records)
+
+    source_specific_na_records = await fetch_source_specific_na_records(
+        source,
+        user_agent=settings.user_agent,
+    )
+    if source_specific_na_records is not None:
+        return _ingest_direct_raw_records(source, settings, source_specific_na_records)
 
     crawler = BrowserCrawler(
         source,
@@ -246,7 +255,29 @@ def _dedupe_raw_records(raw_records: list[RawMeeting]) -> list[RawMeeting]:
 def _scraped_result_too_broad_for_source(source: Source, raw_records: list[RawMeeting]) -> bool:
     if source.fellowship != "na" or _source_na_type(source) != "area":
         return False
-    return len(raw_records) >= 500
+    if len(raw_records) >= 500:
+        return True
+    return len(raw_records) >= 200 and _records_from_current_meeting_list(raw_records)
+
+
+def _records_from_current_meeting_list(raw_records: list[RawMeeting]) -> bool:
+    for record in raw_records:
+        extraction = record.payload.get("extraction")
+        if not isinstance(extraction, dict):
+            continue
+        source_page_url = extraction.get("source_page_url")
+        if not isinstance(source_page_url, str):
+            continue
+        query_keys = {
+            key.lower()
+            for key, _value in parse_qsl(
+                urlparse(source_page_url).query,
+                keep_blank_values=True,
+            )
+        }
+        if "current-meeting-list" in query_keys:
+            return True
+    return False
 
 
 def _bmlt_fallback_too_broad_for_source(source: Source, raw_records: list[RawMeeting]) -> bool:

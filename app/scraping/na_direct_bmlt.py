@@ -8,6 +8,10 @@ _DIRECT_BMLT_ENDPOINTS = {
         "https://tomato.bmltenabled.org/main_server/client_interface/json/"
         "?switcher=GetSearchResults&services[]=16&recursive=1"
     ),
+    "na-41b6e1cb9842": (
+        "https://pszfna.org/main_server/client_interface/json/"
+        "?switcher=GetSearchResults&services[]=42&recursive=1"
+    ),
     "na-0e14cccfb90e": (
         "https://bmlt.wszf.org/main_server/client_interface/json/"
         "?switcher=GetSearchResults&services[]=1150&recursive=1"

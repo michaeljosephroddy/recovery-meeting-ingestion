@@ -49,6 +49,11 @@ The user-visible result is visible by running `snapshots/latest.json` through `j
 - [x] (2026-05-25T00:55Z) Ran a concurrent dry-run diagnostic over all 36 remaining curated retry candidates into `scrape_artifacts/na-completion-diagnostic-20260525T004814Z`. No source produced importable records under the current generic scraper. South Coastal again extracted a 1,854-row regional-scale table and was correctly blocked by broad-area quarantine. The completion audit document `docs/na_completion_audit_2026-05-25.md` classifies the remaining 36 as 1 broad/duplicate risk and 35 source-specific/manual parser follow-ups.
 - [x] (2026-05-25T01:35Z) Added source-specific direct recovery for the Litoral Norte Gaucho Google Site via filtered Brazil `cade-o-grupo` AJAX and for Red River via the current `www.redriverna.com` OklaTex meeting schedule PDF. Persisted the three resolved sources concurrently: Litoral (16 rows), Red River Oklahoma (6), and Red River Texas (29), all with zero review flags. Exported `snapshots/meetings-2026-05-25T013537Z.json` with `blocked_by_review=0`; NA now has 71,983 active meetings across 661 active sources.
 - [x] (2026-05-25T01:48Z) Added source-specific direct BMLT mappings for eight remaining structured-feed candidates: Downtown Philly (17), Greater Albuquerque (45), Hawaii Region (147), Lone Star Region (623), Mendocino (42), Monterey (33), Ozark (60), and Tejas Bluebonnet (589). Persisted the eight-source batch concurrently with zero review flags and exported `snapshots/meetings-2026-05-25T014811Z.json` with `blocked_by_review=0`; NA now has 73,539 active meetings across 669 active sources.
+- [x] (2026-05-25T09:13Z) Generalized linked `current-meeting-list` PDF recovery, including button `data-url` targets, and persisted three formerly zero-active NA sources: Just for Today Kansas (60), Southern Oregon (40), and Appalachian/CVAANA (22). All three had zero review flags. Exported `snapshots/meetings-2026-05-25T091323Z.json` with `blocked_by_review=0`; NA now has 73,661 active meetings across 672 active sources.
+- [x] (2026-05-25T09:48Z) Fixed low-score rendered-page candidates so they no longer block linked PDF fallback. Persisted Palm Coast (81) and Rock River (46), both with zero review flags. Exported `snapshots/meetings-2026-05-25T094825Z.json` with `blocked_by_review=0`; NA now has 73,788 active meetings across 674 active sources.
+- [x] (2026-05-25T10:05Z) Ran all 15 remaining audited NA candidates concurrently with `--concurrency 6`. No additional safe imports were found. River Coast and Bringing Freedom East now reach region-wide generated PDFs, so broad current-list PDF quarantine was added and verified; both dry-runs now return zero normalized candidates with one `scrape_broad_area_result` warning.
+- [x] (2026-05-25T10:14Z) Fixed encoded meeting-list PDF path matching and recovered Outer Limits Virginia from its GoDaddy-hosted `Meetings%20Updated...pdf`. Persisted 5 active records with zero review flags and exported `snapshots/meetings-2026-05-25T101405Z.json` with `blocked_by_review=0`; NA now has 73,793 active meetings across 675 active sources.
+- [x] (2026-05-25T11:31Z) Completed the final concurrent source-specific NA closure pass. Added a direct EASC BMLT service-body mapping plus CT BMLTWF, New River Valley, Luzon, Bermuda, Thailand, and Belarus parsers; persisted 532 net active NA meetings across 7 additional active sources with zero review flags. Exported `snapshots/meetings-2026-05-25T113118Z.json` with `blocked_by_review=0`; NA now has 74,325 active meetings across 682 active sources.
 
 ## Surprises & Discoveries
 
@@ -136,6 +141,10 @@ The user-visible result is visible by running `snapshots/latest.json` through `j
     Evidence: Trinidad & Tobago's Webstarts page exposes only a Google My Maps embed. The old My Maps KML endpoint returned 404, and the visible page did not contain meeting days or times, so it remains manual/location-only rather than importing unscheduled place records.
 - Observation: Several remaining "zero" pages were not scraper failures; their pages delegated to known BMLT roots with service-body IDs that the generic crawler had not reached.
     Evidence: Downtown Philly, Greater Albuquerque, Hawaii, Lone Star, Mendocino, Monterey, Ozark, and Tejas Bluebonnet all returned scoped JSON directly from BMLT roots and normalized 1,556 rows with zero review flags.
+- Observation: Generated current-list PDFs can be regional even when discovered from area sources.
+    Evidence: River Coast's page linked to `naflorida.org/?current-meeting-list=1`, which rendered a 460-row Florida Region list covering many Florida areas plus Bermuda and Trinidad and Tobago. Bringing Freedom East's Colorado source rendered a 240-row statewide `nacolorado.org` list. Both are now quarantined for NA area sources.
+- Observation: Meeting-list PDFs can be hidden behind encoded file names and generic "Download" link text.
+    Evidence: Outer Limits exposed a GoDaddy download button whose anchor text was only `Download`, while the actual href path contained `Meetings%20Updated%2012%205%2025.pdf`. Decoding the path before keyword matching let the existing PDF text extractor recover 5 current meetings.
 
 ## Decision Log
 
@@ -214,10 +223,19 @@ The user-visible result is visible by running `snapshots/latest.json` through `j
 - Decision: Add verified source-specific BMLT endpoint mappings for the remaining structured-feed candidates instead of expanding generic browser crawling.
     Rationale: The endpoints are deterministic, faster, and scopeable by service body. The dry-run proved they normalize cleanly with no review flags, while prior generic browser diagnostics returned zero for the same sources.
     Date/Author: 2026-05-25 / Codex.
+- Decision: Quarantine generated `current-meeting-list` PDF results of 200 or more rows for NA area sources.
+    Rationale: Legitimate area printable lists recovered in this pass were much smaller, while the new 240-row and 460-row candidates were clearly region-wide lists reached from area pages. The guard prevents concurrent retries from importing regional records under local area source IDs.
+    Date/Author: 2026-05-25 / Codex.
+- Decision: Decode URL-encoded PDF paths before applying meeting-list keyword filters.
+    Rationale: Encoded spaces are common in hosted download URLs. Decoding only the path preserves the existing conservative keyword and negative-term checks while allowing names such as `Meetings%20Updated...pdf` to match.
+    Date/Author: 2026-05-25 / Codex.
+- Decision: Finish the remaining recoverable NA audit rows with source-specific adapters instead of broad crawler loosening.
+    Rationale: The last recoverable rows each had a clear source shape: BMLT service body, BMLTWF JSON, stacked schedule page, Weebly schedule, WordPress schedule, area-page index, or Russian schedule tables. Narrow adapters recovered clean rows with zero review flags without increasing generic false-positive risk.
+    Date/Author: 2026-05-25 / Codex.
 
 ## Outcomes & Retrospective
 
-Discovery repair, classifier changes, a controlled concurrent scrape batch, full NA classification, full concurrent scrape/import, targeted concurrent failed/zero retries, BMLT data-script recovery, classed-row and localized-table parser recovery, meeting-list PDF recovery, Japanese PDF and paragraph-page recovery, iframe/embed recovery, source-replacement recovery, source-ID filtered retry buckets, directory-link protection for generic search forms, Japan area branch scoping, repeatable zero-source audit, broad-area quarantine, timezone cleanup, source-specific direct BMLT recovery, and snapshot export are implemented and validated. NA active meetings increased from 2,681 at baseline to 73,539, and active NA source coverage increased from 6 sources to 669 sources. `snapshots/latest.json` now contains 172,458 total active meetings, and the latest export is `snapshots/meetings-2026-05-25T014811Z.json` with `blocked_by_review=0`. Remaining follow-up work is limited to two open NA `missing_timezone` warnings for Australia online-only rows with no city/region, Okinawa Japan's server-error source page, and 20 source-specific/manual parser or duplicate-risk follow-ups documented in `docs/na_completion_audit_2026-05-25.md`.
+Discovery repair, classifier changes, a controlled concurrent scrape batch, full NA classification, full concurrent scrape/import, targeted concurrent failed/zero retries, BMLT data-script recovery, classed-row and localized-table parser recovery, meeting-list PDF recovery, Japanese PDF and paragraph-page recovery, iframe/embed recovery, source-replacement recovery, source-ID filtered retry buckets, directory-link protection for generic search forms, Japan area branch scoping, repeatable zero-source audit, broad-area quarantine, timezone cleanup, source-specific direct BMLT recovery, linked current-list PDF recovery, encoded PDF path recovery, final source-specific parser recovery, and snapshot export are implemented and validated. NA active meetings increased from 2,681 at baseline to 74,325, and active NA source coverage increased from 6 sources to 682 sources. `snapshots/latest.json` now contains 173,244 total active meetings, and the latest export is `snapshots/meetings-2026-05-25T113118Z.json` with `blocked_by_review=0`. Remaining NA follow-up work is limited to unrecoverable/manual or broad-risk sources documented in `docs/na_completion_audit_2026-05-25.md`: three broad regional duplicate-risk current-list/table sources and four manual/stale/blocked sources.
 
 ## Context and Orientation
 
@@ -317,13 +335,13 @@ The first controlled concurrent scrape has met this acceptance bar. It wrote `sc
 
 For final scraping, run the full concurrent command, audit review flags, and export. Acceptance: `export-snapshot --no-dry-run` reports `blocked_by_review: 0`, `snapshots/latest.json` is refreshed, and NA active meeting count and/or source coverage are materially broader than the baseline.
 
-Final acceptance is met. The latest export is `snapshots/meetings-2026-05-25T012220Z.json` with `blocked_by_review: 0`. The final full validation run passed:
+Final acceptance is met. The latest export is `snapshots/meetings-2026-05-25T113118Z.json` with `blocked_by_review: 0`. The final full validation run passed:
 
     .venv/bin/ruff check app tests
     .venv/bin/mypy app
     .venv/bin/pytest -q
 
-Pytest reported 207 passed and 13 skipped.
+Pytest reported 217 passed and 13 skipped.
 
 ## Idempotence and Recovery
 
@@ -376,3 +394,9 @@ If browser classification is added, it should update `Source.adapter_type` to `A
 2026-05-25: Added a source-specific direct AJAX parser for Brazil `na.org.br` `cade-o-grupo` meeting pages. The parser bypasses browser UI interaction, scopes area sources by metadata city when present, and imported 1,261 active occurrence records for `na-57cee7d3ba6b` plus 44 for `na-0311a0916a61` with zero review flags. Current NA active coverage is 71,872 meetings across 655 sources; exported snapshot `snapshots/meetings-2026-05-25T011102Z.json` has `blocked_by_review: 0`.
 
 2026-05-25: Continued the parser-gap group concurrently. Added direct BMLT imports for Ocean Gateway (`na-a78c156fa126`, service body `38`, 33 active records) and SAMMA (`na-f89bb33e4f09`, service body `162`, 16 active records), plus a Ukrainian WordPress block parser for `na-be52cc6d882d` (11 active records). All three persisted with zero review flags. UK Farsi remains blocked/manual because `meetings.ukna.org` and `online.ukna.org` return Cloudflare challenge pages and the accessible UKNA page does not expose a Farsi/Persian feed. Current NA active coverage is 71,932 meetings across 658 sources; exported snapshot `snapshots/meetings-2026-05-25T012220Z.json` has `blocked_by_review: 0`.
+
+2026-05-25: Generalized linked `current-meeting-list` PDF recovery so browser pages can fetch printable list URLs discovered in anchors or button `data-url` attributes. This recovered Just for Today Kansas (`na-3e653e4288a3`, 60 records), Southern Oregon (`na-90efe8899be9`, 40 records), and Appalachian/CVAANA (`na-80b945d48ccb`, 22 records) with zero review flags. Current NA active coverage is 73,661 meetings across 672 sources; exported snapshot `snapshots/meetings-2026-05-25T091323Z.json` has `blocked_by_review: 0`.
+
+2026-05-25: Moved the local-page low-score extraction threshold ahead of embed/PDF fallback so weak rendered-page candidates do not suppress stronger linked meeting-list recovery. This recovered Palm Coast (`na-3a9a90702ff7`, 81 records) and Rock River (`na-c61bddc3eff3`, 46 records) with zero review flags. Current NA active coverage is 73,788 meetings across 674 sources; exported snapshot `snapshots/meetings-2026-05-25T094825Z.json` has `blocked_by_review: 0`.
+
+2026-05-25: Completed the final source-specific closure pass concurrently. Added EASC direct BMLT service body `42`, CT BMLTWF JSON parsing, and parsers for New River Valley, Luzon, Bermuda, Thailand, and Belarus. The pass persisted 532 net active NA meetings across 7 additional active sources with zero review flags. Current NA active coverage is 74,325 meetings across 682 sources; exported snapshot `snapshots/meetings-2026-05-25T113118Z.json` has `blocked_by_review: 0`.

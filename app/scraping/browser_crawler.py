@@ -9,7 +9,15 @@ from hashlib import sha1
 from html import escape
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urldefrag, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import (
+    parse_qsl,
+    unquote,
+    urldefrag,
+    urlencode,
+    urljoin,
+    urlparse,
+    urlunparse,
+)
 
 from bs4 import BeautifulSoup
 
@@ -446,6 +454,12 @@ class BrowserCrawler:
                 html = rendered_html
                 page_score = rendered_page_score
                 extracted = rendered_extracted
+        if (
+            extracted
+            and self.source.source_type != SourceType.WORLD_SERVICE_LISTING
+            and page_score.score < self.settings.local_page_min_extraction_score
+        ):
+            extracted = []
         if not extracted and self.source.source_type != SourceType.WORLD_SERVICE_LISTING:
             embed_result = await _extract_meetings_from_embeds(
                 page,
@@ -483,7 +497,10 @@ class BrowserCrawler:
                 traces.append(
                     BrowserActionTrace(
                         action="pdf_meeting_list",
-                        selector="a[href$='.pdf']",
+                        selector=(
+                            "a[href$='.pdf'], a[href*='current-meeting-list'], "
+                            "[data-url*='current-meeting-list']"
+                        ),
                         value=pdf_url,
                         status="succeeded",
                         message=f"extracted {len(pdf_extracted)} records",
@@ -1425,9 +1442,13 @@ def _meeting_pdf_links(links: list[dict[str, str]]) -> list[dict[str, str]]:
 
 def _looks_like_meeting_pdf_link(url: str, text: str) -> bool:
     parsed = urlparse(url)
+    path_text = unquote(parsed.path)
+    haystack = f"{text} {path_text}".replace("_", " ").replace("-", " ").lower()
     if not parsed.path.lower().endswith(".pdf"):
-        return False
-    haystack = f"{text} {parsed.path}".replace("_", " ").replace("-", " ").lower()
+        query_keys = {key.lower() for key, _value in parse_qsl(parsed.query)}
+        if "current-meeting-list" not in query_keys:
+            return False
+        return any(term in haystack for term in ("meeting list", "meeting schedule", "schedule"))
     negative_terms = (
         "agenda",
         "annual",
@@ -1479,10 +1500,10 @@ def _looks_like_downloadable_meeting_list_url(url: str) -> bool:
 
 async def _page_links(page: Any, base_url: str) -> list[dict[str, str]]:
     raw_links = await page.eval_on_selector_all(
-        "a[href], link[rel~='alternate'][type='application/json'][href]",
+        "a[href], link[rel~='alternate'][type='application/json'][href], [data-url]",
         """
         links => links.map(link => ({
-          url: link.getAttribute('href'),
+          url: link.getAttribute('href') || link.getAttribute('data-url'),
           text: link.textContent || link.getAttribute('title') || link.getAttribute('type') || ''
         }))
         """,

@@ -1409,6 +1409,7 @@ async def test_crawler_collects_alternate_json_meeting_feed() -> None:
     class FakePage:
         async def eval_on_selector_all(self, selector: str, script: str) -> list[dict[str, str]]:
             assert "link[rel~='alternate'][type='application/json'][href]" in selector
+            assert "[data-url]" in selector
             assert "links.map" in script
             return [
                 {
@@ -1433,6 +1434,7 @@ async def test_crawler_converts_tsml_filter_links_to_json_feed() -> None:
     class FakePage:
         async def eval_on_selector_all(self, selector: str, script: str) -> list[dict[str, str]]:
             assert "link[rel~='alternate'][type='application/json'][href]" in selector
+            assert "[data-url]" in selector
             assert "links.map" in script
             return [
                 {
@@ -1613,6 +1615,14 @@ def test_crawler_filters_meeting_list_pdfs() -> None:
             "url": "https://najapan.org/chubu/meeting/chubu.pdf",
             "text": "中部エリアミーティングリスト・略図付き（PDF）",
         },
+        {
+            "url": "https://example.org/?current-meeting-list=1",
+            "text": "Print Meeting List",
+        },
+        {
+            "url": "https://img1.wsimg.com/downloads/Meetings%20Updated%2012%205%2025.pdf?ver=1",
+            "text": "Download",
+        },
     ]
 
     assert _meeting_pdf_links(links) == [
@@ -1623,6 +1633,14 @@ def test_crawler_filters_meeting_list_pdfs() -> None:
         {
             "url": "https://najapan.org/chubu/meeting/chubu.pdf",
             "text": "中部エリアミーティングリスト・略図付き（PDF）",
+        },
+        {
+            "url": "https://example.org/?current-meeting-list=1",
+            "text": "Print Meeting List",
+        },
+        {
+            "url": "https://img1.wsimg.com/downloads/Meetings%20Updated%2012%205%2025.pdf?ver=1",
+            "text": "Download",
         },
     ]
 
