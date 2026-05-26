@@ -11,6 +11,7 @@ from app.adapters.playwright_browser import PlaywrightBrowserAdapter
 from app.adapters.static_html import StaticHtmlAdapter
 from app.config import Settings
 from app.normalize.canonical import CanonicalMeetingCandidate
+from app.normalize.location_quality import normalize_candidate_location
 from app.review.flags import ReviewFlag, flags_for_candidate
 from app.scraping.scoring import review_code_for_confidence
 from app.sources.registry import AdapterType, Source
@@ -70,6 +71,7 @@ def ingest_raw_records(
                 )
             )
             continue
+        candidate = normalize_candidate_location(candidate, source)
         candidates.append(candidate)
         review_flags.extend(flags_for_candidate(candidate))
     return IngestResult(

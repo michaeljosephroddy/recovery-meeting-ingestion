@@ -255,6 +255,45 @@ def test_review_flags_are_persisted_and_error_flags_block_snapshot_requires_loca
     assert all(item.source_record_id != "review-1" for item in candidates_with_error)
 
 
+def test_snapshot_excludes_source_marked_excluded_requires_local_db() -> None:
+    if os.environ.get("RUN_DB_TESTS") != "1":
+        pytest.skip("set RUN_DB_TESTS=1 to run local Postgres integration tests")
+
+    settings = Settings()
+    source = source_from_candidate(
+        SourceCandidate(
+            fellowship="aa",
+            label="Integration Test Excluded Source",
+            url="https://integration.example.org/excluded-meetings",
+            country="US",
+        )
+    ).model_copy(update={"config": {"snapshot_excluded": True}})
+    candidate = CanonicalMeetingCandidate(
+        fellowship="aa",
+        source_id=source.id,
+        source_record_id="excluded-1",
+        source_url=source.url,
+        name="Excluded Test Meeting",
+        meeting_type="in_person",
+        venue_name="Test Hall",
+        address_line1="1 Test Street",
+        city="Testville",
+        country="US",
+        occurrences=[
+            MeetingOccurrence(day_of_week=2, start_time_local="18:00", timezone="America/New_York")
+        ],
+    )
+
+    with connect(settings) as connection:
+        SourceRepository(connection).upsert_source(source)
+        canonical_repository = CanonicalMeetingRepository(connection)
+        canonical_repository.upsert_candidates([candidate])
+        candidates = canonical_repository.list_active_candidates_for_snapshot()
+        connection.rollback()
+
+    assert all(item.source_record_id != "excluded-1" for item in candidates)
+
+
 def test_missing_meetings_become_stale_then_inactive_requires_local_db() -> None:
     if os.environ.get("RUN_DB_TESTS") != "1":
         pytest.skip("set RUN_DB_TESTS=1 to run local Postgres integration tests")

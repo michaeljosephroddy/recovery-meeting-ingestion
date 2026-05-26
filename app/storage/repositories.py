@@ -180,7 +180,8 @@ class CanonicalMeetingRepository:
                 """
                 INSERT INTO canonical_meetings (
                     fellowship, source_id, source_record_id, source_url, name, meeting_type,
-                    venue_name, address_line1, address_line2, city, region, postal_code, country,
+                    venue_name, address_line1, address_line2, city, region, region_code,
+                    postal_code, country, country_code, raw_location_text,
                     latitude, longitude, is_approximate_location, online_url, phone_join_info,
                     formats, language, accessibility_notes, last_seen_at, last_verified_at,
                     missing_run_count, updated_at
@@ -188,7 +189,8 @@ class CanonicalMeetingRepository:
                 VALUES (
                     %(fellowship)s, %(source_id)s, %(source_record_id)s, %(source_url)s,
                     %(name)s, %(meeting_type)s, %(venue_name)s, %(address_line1)s,
-                    %(address_line2)s, %(city)s, %(region)s, %(postal_code)s, %(country)s,
+                    %(address_line2)s, %(city)s, %(region)s, %(region_code)s, %(postal_code)s,
+                    %(country)s, %(country_code)s, %(raw_location_text)s,
                     %(latitude)s, %(longitude)s, %(is_approximate_location)s, %(online_url)s,
                     %(phone_join_info)s, %(formats)s, %(language)s, %(accessibility_notes)s,
                     COALESCE(%(last_seen_at)s, NOW()), %(last_verified_at)s, 0, NOW()
@@ -203,8 +205,11 @@ class CanonicalMeetingRepository:
                     address_line2 = EXCLUDED.address_line2,
                     city = EXCLUDED.city,
                     region = EXCLUDED.region,
+                    region_code = EXCLUDED.region_code,
                     postal_code = EXCLUDED.postal_code,
                     country = EXCLUDED.country,
+                    country_code = EXCLUDED.country_code,
+                    raw_location_text = EXCLUDED.raw_location_text,
                     latitude = EXCLUDED.latitude,
                     longitude = EXCLUDED.longitude,
                     is_approximate_location = EXCLUDED.is_approximate_location,
@@ -307,21 +312,25 @@ class CanonicalMeetingRepository:
             cursor.execute(
                 """
                 SELECT
-                    id, fellowship, source_id, source_record_id, source_url, name, meeting_type,
-                    venue_name, address_line1, address_line2, city, region, postal_code, country,
-                    latitude, longitude, is_approximate_location, online_url, phone_join_info,
-                    formats, language, accessibility_notes, last_seen_at, last_verified_at
-                FROM canonical_meetings
-                WHERE status = 'active'
+                    cm.id, cm.fellowship, cm.source_id, cm.source_record_id, cm.source_url,
+                    cm.name, cm.meeting_type, cm.venue_name, cm.address_line1, cm.address_line2,
+                    cm.city, cm.region, cm.region_code, cm.postal_code, cm.country,
+                    cm.country_code, cm.raw_location_text, cm.latitude, cm.longitude,
+                    cm.is_approximate_location, cm.online_url, cm.phone_join_info, cm.formats,
+                    cm.language, cm.accessibility_notes, cm.last_seen_at, cm.last_verified_at
+                FROM canonical_meetings cm
+                JOIN sources ON sources.id = cm.source_id
+                WHERE cm.status = 'active'
+                  AND COALESCE(sources.config->>'snapshot_excluded', 'false') <> 'true'
                   AND NOT EXISTS (
                       SELECT 1
                       FROM review_flags rf
-                      WHERE rf.source_id = canonical_meetings.source_id
-                        AND rf.source_record_id = canonical_meetings.source_record_id
+                      WHERE rf.source_id = cm.source_id
+                        AND rf.source_record_id = cm.source_record_id
                         AND rf.status = 'open'
                         AND rf.severity = 'error'
                   )
-                ORDER BY fellowship, country NULLS LAST, city NULLS LAST, name
+                ORDER BY cm.fellowship, cm.country NULLS LAST, cm.city NULLS LAST, cm.name
                 """
             )
             rows = [dict(row) for row in cursor.fetchall()]
@@ -565,8 +574,11 @@ def _candidate_params(candidate: CanonicalMeetingCandidate) -> dict[str, object]
         "address_line2": candidate.address_line2,
         "city": candidate.city,
         "region": candidate.region,
+        "region_code": candidate.region_code,
         "postal_code": candidate.postal_code,
         "country": candidate.country,
+        "country_code": candidate.country_code,
+        "raw_location_text": candidate.raw_location_text,
         "latitude": candidate.latitude,
         "longitude": candidate.longitude,
         "is_approximate_location": candidate.is_approximate_location,
@@ -596,8 +608,11 @@ def _candidate_from_row(
         address_line2=row["address_line2"],
         city=row["city"],
         region=row["region"],
+        region_code=row["region_code"],
         postal_code=row["postal_code"],
         country=row["country"],
+        country_code=row["country_code"],
+        raw_location_text=row["raw_location_text"],
         latitude=row["latitude"],
         longitude=row["longitude"],
         is_approximate_location=bool(row["is_approximate_location"]),

@@ -36,8 +36,11 @@ class CanonicalMeetingCandidate(BaseModel):
     address_line2: str | None = None
     city: str | None = None
     region: str | None = None
+    region_code: str | None = None
     postal_code: str | None = None
     country: str | None = None
+    country_code: str | None = None
+    raw_location_text: str | None = None
     latitude: float | None = None
     longitude: float | None = None
     is_approximate_location: bool = False
@@ -94,8 +97,10 @@ class SnapshotMeeting(BaseModel):
     address_line2: str | None = None
     city: str | None = None
     region: str | None = None
+    region_code: str | None = None
     postal_code: str | None = None
     country: str | None = None
+    country_code: str | None = None
     latitude: float | None = None
     longitude: float | None = None
     is_approximate_location: bool
@@ -113,4 +118,3 @@ class Snapshot(BaseModel):
     generated_at: datetime
     service_date: date | None = None
     meetings: list[SnapshotMeeting]
-

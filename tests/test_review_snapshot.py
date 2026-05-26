@@ -62,6 +62,143 @@ def test_review_flags_allow_zoom_url() -> None:
     assert "possible_personal_contact" not in codes
 
 
+def test_review_flags_block_schedule_navigation_artifact() -> None:
+    candidate = CanonicalMeetingCandidate(
+        fellowship="na",
+        source_id="na-24725a7be4e0",
+        source_record_id="4e9023a7cbc6c484",
+        source_url="https://www.gtascna.org/home/meetings",
+        name="PRINTABLE MEETING SCHEDULE",
+        meeting_type="in_person",
+        venue_name=(
+            "NA Virtual Meetings are listed here: Virtual-NA.org or nastuff.com "
+            "(includes instructions on how to attend the meetings.)"
+        ),
+        city="Greater London",
+        region="Ontario",
+        country="Canada",
+        occurrences=[
+            MeetingOccurrence(day_of_week=1, start_time_local="19:00", timezone="America/Toronto")
+        ],
+    )
+
+    flags = flags_for_candidate(candidate)
+
+    assert any(
+        flag.code == "location_text_artifact" and flag.severity == "error"
+        for flag in flags
+    )
+
+
+def test_review_flags_block_wordfence_security_artifact() -> None:
+    candidate = CanonicalMeetingCandidate(
+        fellowship="aa",
+        source_id="aa-546062fcac69",
+        source_record_id="57c279e7c33cf92e",
+        source_url="https://aadistrict11.ca/meetings/",
+        name="Time:",
+        meeting_type="in_person",
+        venue_name=(
+            "You can also read the documentation to learn about Wordfence's blocking "
+            "tools, or visit wordfence.com to learn more about Wordfence."
+        ),
+        address_line1=(
+            "Wordfence is a security plugin installed on over 5 million WordPress sites. "
+            "The owner of this site is using Wordfence to manage access to their site."
+        ),
+        city="About Wordfence",
+        region="ON",
+        country="Canada",
+        occurrences=[
+            MeetingOccurrence(day_of_week=1, start_time_local="19:00", timezone="America/Toronto")
+        ],
+    )
+
+    flags = flags_for_candidate(candidate)
+
+    assert any(
+        flag.code == "location_text_artifact" and flag.severity == "error"
+        for flag in flags
+    )
+
+
+def test_review_flags_block_time_label_as_meeting_name() -> None:
+    candidate = CanonicalMeetingCandidate(
+        fellowship="aa",
+        source_id="aa-4350f72ee9f4",
+        source_record_id="f7677adb55d30808",
+        source_url="https://aaorg.kz/meetings/",
+        name="Time:",
+        meeting_type="in_person",
+        address_line1="+7 707-135-03-05",
+        country="Kazakhstan",
+        occurrences=[
+            MeetingOccurrence(day_of_week=6, start_time_local="09:00", timezone="Asia/Almaty")
+        ],
+    )
+
+    flags = flags_for_candidate(candidate)
+
+    assert any(
+        flag.code == "location_text_artifact" and flag.severity == "error"
+        for flag in flags
+    )
+
+
+def test_review_flags_block_schedule_table_collapsed_into_city() -> None:
+    candidate = CanonicalMeetingCandidate(
+        fellowship="aa",
+        source_id="aa-5b043cc2986f",
+        source_record_id="716475a6b88fbb25",
+        source_url="http://www.aaworcester.org/meetinglist.aspx?grp=wai",
+        name="5:00A",
+        meeting_type="in_person",
+        venue_name="Bellingham",
+        address_line1="Tune Up",
+        city=(
+            "(99) In-Person + OnLine Meetings Today Time Town Meeting Location "
+            "Address Type 5:00A Bellingham Tune Up How It Works Club "
+            "176 Mechanic St CDMH 6:30A Bellingham AA Awakenings How It Works Club"
+        ),
+        region="Massachusetts",
+        country="United States",
+    )
+
+    flags = flags_for_candidate(candidate)
+
+    assert any(
+        flag.code == "location_text_artifact" and flag.severity == "error"
+        for flag in flags
+    )
+
+
+def test_review_flags_block_schedule_table_collapsed_into_name() -> None:
+    candidate = CanonicalMeetingCandidate(
+        fellowship="aa",
+        source_id="aa-78a768b03fa2",
+        source_record_id="c3b8114faea5ea98",
+        source_url="https://www.pghaa.org/meetings",
+        name=(
+            "Sunday 7:00 AM NORTH PARK EARLY SUNDAY Open Speaker Map This Location "
+            "St Martha`s & Mary Parish 2554 Wildwood Rd ALLISON PARK No Smoking "
+        )
+        * 6,
+        meeting_type="in_person",
+        venue_name="Map This Location",
+        address_line1="Faith United Pres. Church",
+        city="BUTLER",
+        region="Pennsylvania",
+        country="United States",
+    )
+
+    flags = flags_for_candidate(candidate)
+
+    assert any(
+        flag.code == "location_text_artifact" and flag.severity == "error"
+        for flag in flags
+    )
+
+
 def test_review_flags_source_drop_over_twenty_percent() -> None:
     flag = flag_source_drop(previous_active_count=100, current_active_count=79)
 
