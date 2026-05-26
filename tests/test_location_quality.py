@@ -179,6 +179,107 @@ def test_build_snapshot_extracts_structured_australian_address_parts() -> None:
     assert meeting.occurrences[0].timezone == "Australia/Darwin"
 
 
+def test_build_snapshot_moves_irish_county_city_value_to_region() -> None:
+    snapshot = build_snapshot(
+        [
+            candidate(
+                fellowship="ca",
+                source_id="ca-ireland",
+                address_line1="8 Station Rd, Maryborough, Portlaoise, Co. Laois",
+                city="Co. Laois",
+                country="Ireland",
+                occurrences=[occurrence("Europe/Dublin")],
+            )
+        ]
+    )
+
+    meeting = snapshot.meetings[0]
+
+    assert meeting.address_line1 == "8 Station Rd, Maryborough"
+    assert meeting.city == "Portlaoise"
+    assert meeting.region == "Laois"
+    assert meeting.country == "Ireland"
+    assert meeting.country_code == "IE"
+
+
+def test_build_snapshot_preserves_irish_cities_that_share_county_names() -> None:
+    snapshot = build_snapshot(
+        [
+            candidate(
+                fellowship="na",
+                source_id="na-ireland",
+                address_line1="2 Main Road",
+                city="Cork",
+                region="County Cork",
+                country="Ireland",
+                occurrences=[occurrence("Europe/Dublin")],
+            ),
+            candidate(
+                fellowship="ca",
+                source_id="ca-ireland",
+                source_record_id="dublin-record",
+                address_line1="38 Gardiner Street Lower, North City, Dublin 1",
+                city="Dublin",
+                region="County Dublin",
+                country="Ireland",
+                occurrences=[occurrence("Europe/Dublin")],
+            ),
+        ]
+    )
+
+    cork = snapshot.meetings[0]
+    dublin = snapshot.meetings[1]
+
+    assert cork.city == "Cork"
+    assert cork.region == "Cork"
+    assert dublin.city == "Dublin"
+    assert dublin.region == "Dublin"
+
+
+def test_build_snapshot_clears_county_city_when_state_region_exists() -> None:
+    snapshot = build_snapshot(
+        [
+            candidate(
+                source_id="aa-orange-county",
+                address_line1="Orange County, CA",
+                city="Orange County",
+                region="California",
+                country="United States",
+                occurrences=[occurrence("America/Los_Angeles")],
+            )
+        ]
+    )
+
+    meeting = snapshot.meetings[0]
+
+    assert meeting.city is None
+    assert meeting.region == "California"
+    assert meeting.region_code == "CA"
+
+
+def test_build_snapshot_does_not_infer_county_from_address_as_city() -> None:
+    snapshot = build_snapshot(
+        [
+            candidate(
+                fellowship="aa",
+                source_id="aa-canada",
+                address_line1="Hwy 337, Antigonish County, NS, Canada",
+                city=None,
+                region="All Districts",
+                country="Canada",
+                occurrences=[occurrence("America/Halifax")],
+            )
+        ]
+    )
+
+    meeting = snapshot.meetings[0]
+
+    assert meeting.address_line1 == "Hwy 337"
+    assert meeting.city is None
+    assert meeting.region == "Nova Scotia"
+    assert meeting.region_code == "NS"
+
+
 def test_normalize_candidate_location_does_not_use_australian_state_name_in_street() -> None:
     normalized = normalize_candidate_location(
         candidate(
@@ -242,7 +343,9 @@ def test_build_snapshot_extracts_structured_us_address_parts() -> None:
             occurrences=[occurrence("America/Los_Angeles")],
         )
     )
-    assert normalized.raw_location_text == "810 E Princeton St, Ontario, CA 91764, USA | Ontario | United States"
+    assert normalized.raw_location_text == (
+        "810 E Princeton St, Ontario, CA 91764, USA | Ontario | United States"
+    )
 
 
 def test_normalize_candidate_location_does_not_use_us_state_name_in_street() -> None:
@@ -487,6 +590,41 @@ def test_location_audit_reports_raw_conflicts_and_missing_countries() -> None:
     assert audit.issue_counts["high_confidence_missing_country"] == 1
 
 
+def test_location_audit_reports_admin_area_in_city() -> None:
+    county_city = SnapshotMeeting(
+        fellowship="ca",
+        source_id="ca-ireland",
+        source_record_id="county-city",
+        source_url="https://example.org/meetings",
+        name="County City",
+        meeting_type="in_person",
+        address_line1="8 Station Rd, Maryborough, Portlaoise, Co. Laois",
+        city="Co. Laois",
+        country="Ireland",
+        is_approximate_location=False,
+        formats=[],
+        occurrences=[occurrence("Europe/Dublin")],
+    )
+    all_country_city = SnapshotMeeting(
+        fellowship="ca",
+        source_id="ca-ireland",
+        source_record_id="all-ireland",
+        source_url="https://example.org/meetings",
+        name="All Ireland",
+        meeting_type="online",
+        city="All Ireland",
+        country="Ireland",
+        is_approximate_location=False,
+        online_url="https://example.org/online",
+        formats=[],
+        occurrences=[occurrence("Europe/Dublin")],
+    )
+
+    audit = audit_snapshot_meetings([county_city, all_country_city])
+
+    assert audit.issue_counts["city_admin_area"] == 2
+
+
 def test_build_snapshot_removes_auditable_country_issues_by_normalizing() -> None:
     snapshot = build_snapshot(
         [
@@ -510,3 +648,31 @@ def test_build_snapshot_removes_auditable_country_issues_by_normalizing() -> Non
 
     assert audit.issue_counts["high_confidence_country_conflict"] == 0
     assert audit.issue_counts["high_confidence_missing_country"] == 0
+
+
+def test_build_snapshot_removes_auditable_admin_area_city_issue() -> None:
+    snapshot = build_snapshot(
+        [
+            candidate(
+                fellowship="ca",
+                source_id="ca-ireland",
+                address_line1="8 Station Rd, Maryborough, Portlaoise, Co. Laois",
+                city="Co. Laois",
+                country="Ireland",
+                occurrences=[occurrence("Europe/Dublin")],
+            ),
+            candidate(
+                fellowship="ca",
+                source_id="ca-ireland",
+                source_record_id="all-ireland",
+                city="All Ireland",
+                country="Ireland",
+                online_url="https://example.org/online",
+                occurrences=[occurrence("Europe/Dublin")],
+            ),
+        ]
+    )
+
+    audit = audit_snapshot_meetings(snapshot.meetings)
+
+    assert audit.issue_counts["city_admin_area"] == 0

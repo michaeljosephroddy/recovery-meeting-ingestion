@@ -93,6 +93,33 @@ def test_static_html_adapter_infers_canada_timezone_from_address() -> None:
     assert candidate.occurrences[0].timezone == "America/Toronto"
 
 
+def test_static_html_adapter_does_not_treat_on_as_ontario_outside_canada() -> None:
+    source = static_source().model_copy(update={"country": "Ireland", "config": {}})
+    raw = RawMeeting(
+        source_id=source.id,
+        source_record_id="ireland-on-word",
+        source_url=source.url,
+        payload={
+            "name": "C.A. Nenagh",
+            "day": "Friday",
+            "time": "7:00 pm",
+            "address_line1": (
+                "Open Meeting to family, friends and other interested people "
+                "on the 2nd Friday of March"
+            ),
+            "region": "Co. Tipperary",
+            "timezone": "UTC",
+        },
+        content_hash="hash",
+    )
+
+    candidate = StaticHtmlAdapter(source).normalize(raw)
+
+    assert candidate.country == "Ireland"
+    assert candidate.region == "Co. Tipperary"
+    assert candidate.occurrences[0].timezone == "Europe/Dublin"
+
+
 def test_static_html_adapter_infers_mexico_timezone_from_address_and_region() -> None:
     source = static_source().model_copy(update={"country": None, "config": {}})
     raw = RawMeeting(

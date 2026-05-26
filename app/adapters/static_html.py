@@ -296,7 +296,7 @@ def _country_region_from_address(
                 return country or "United States", US_REGION_ABBREVIATIONS[token]
             if effective_country == "australia" and token in AUSTRALIA_REGION_ABBREVIATIONS:
                 return country or "Australia", AUSTRALIA_REGION_ABBREVIATIONS[token]
-            if token in CANADA_REGION_ABBREVIATIONS:
+            if effective_country in {"canada", "ca"} and token in CANADA_REGION_ABBREVIATIONS:
                 return country or "Canada", token
             if token in MEXICO_REGION_ABBREVIATIONS:
                 return country or "Mexico", MEXICO_REGION_ABBREVIATIONS[token]
@@ -310,6 +310,10 @@ def _country_from_address_parts(parts: list[str]) -> str | None:
             return canonical
         if normalized in {"us", "usa", "united states", "united states of america"}:
             return "United States"
+        if normalized == "canada":
+            return "Canada"
+        if normalized == "australia":
+            return "Australia"
         if normalized in COUNTRY_TIMEZONES:
             return part
     if any(UK_POSTCODE_RE.search(part) for part in parts):

@@ -987,6 +987,8 @@ def test_extract_meetings_from_rendered_structured_text_list() -> None:
         "Zoom Link: Click Here Access Code: 733 233 3432 Passcode: cabachelor"
     )
     assert meetings[1].payload["attendance_option"] == "In-person"
+    assert meetings[1].payload["region"] == "Co. Galway"
+    assert "city" not in meetings[1].payload
     assert meetings[1].payload["address_line1"] == (
         "Ozanam House, Room 3, St. Augustine Street, Galway, H91 V3PV"
     )
@@ -1019,6 +1021,8 @@ def test_wix_data_items_convert_to_structured_text_meetings() -> None:
 
     assert len(meetings) == 1
     assert meetings[0].payload["name"] == "C.A. Bachelor's Walk"
+    assert meetings[0].payload["region"] == "All Ireland"
+    assert "city" not in meetings[0].payload
     assert meetings[0].payload["phone_join_info"] == (
         "Zoom Link: Click Here Access Code: 733 233 3432"
     )

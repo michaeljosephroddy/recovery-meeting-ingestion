@@ -166,12 +166,55 @@ AUSTRALIA_REGION_ABBREVIATIONS = {
     "VIC": "Victoria",
     "WA": "Western Australia",
 }
+IRELAND_ADMIN_REGIONS = {
+    "all ireland": "All Ireland",
+    "antrim": "Antrim",
+    "armagh": "Armagh",
+    "carlow": "Carlow",
+    "cavan": "Cavan",
+    "clare": "Clare",
+    "cork": "Cork",
+    "derry": "Derry",
+    "donegal": "Donegal",
+    "down": "Down",
+    "dublin": "Dublin",
+    "dublin north": "Dublin North",
+    "dublin south": "Dublin South",
+    "fermanagh": "Fermanagh",
+    "galway": "Galway",
+    "kerry": "Kerry",
+    "kildare": "Kildare",
+    "kilkenny": "Kilkenny",
+    "laois": "Laois",
+    "leitrim": "Leitrim",
+    "limerick": "Limerick",
+    "longford": "Longford",
+    "louth": "Louth",
+    "mayo": "Mayo",
+    "meath": "Meath",
+    "monaghan": "Monaghan",
+    "offaly": "Offaly",
+    "roscommon": "Roscommon",
+    "sligo": "Sligo",
+    "tipperary": "Tipperary",
+    "tyrone": "Tyrone",
+    "waterford": "Waterford",
+    "westmeath": "Westmeath",
+    "wexford": "Wexford",
+    "wicklow": "Wicklow",
+}
+IRELAND_ADMIN_REGION_ALIASES = {
+    alias: region
+    for name, region in IRELAND_ADMIN_REGIONS.items()
+    for alias in (name, f"co {name}", f"co. {name}", f"county {name}")
+}
 UK_ADMIN_REGIONS = {
     "england": "England",
     "northern ireland": "Northern Ireland",
     "scotland": "Scotland",
     "wales": "Wales",
     "greater london": "Greater London",
+    **IRELAND_ADMIN_REGION_ALIASES,
 }
 REGION_CODES_BY_COUNTRY: dict[str, dict[str, str]] = {
     "United States": {name: abbr for abbr, name in US_REGION_ABBREVIATIONS.items()},
@@ -197,6 +240,7 @@ ADMIN_REGION_ALIASES_BY_COUNTRY: dict[str, dict[str, str]] = {
         **{name.casefold(): name for name in AUSTRALIA_REGION_TIMEZONES},
         **{abbr.casefold(): name for abbr, name in AUSTRALIA_REGION_ABBREVIATIONS.items()},
     },
+    "Ireland": IRELAND_ADMIN_REGION_ALIASES,
     "United Kingdom": UK_ADMIN_REGIONS,
 }
 
@@ -388,6 +432,14 @@ def normalize_candidate_location(
             address_evidence=address_evidence,
             source_region=source_region,
         )
+        current_city = update.get("city", candidate.city)
+        city_region = None
+        if _looks_like_admin_area_value(current_city if isinstance(current_city, str) else None):
+            city_region = _region_from_city_value(current_city, next_country)
+            if not city_region and not next_region:
+                city_region = _generic_admin_region_from_city_value(current_city)
+        if city_region and (not next_region or _region_from_city_value(next_region, next_country)):
+            next_region = city_region
         if next_region != current_region:
             update["region"] = next_region
 
@@ -430,7 +482,11 @@ def normalize_candidate_location(
         "postal_code",
         "country",
     }
-    if raw_location_text and not candidate.raw_location_text and update.keys() & location_update_keys:
+    if (
+        raw_location_text
+        and not candidate.raw_location_text
+        and update.keys() & location_update_keys
+    ):
         update["raw_location_text"] = raw_location_text
 
     normalized_occurrences = _occurrences_for_location(
@@ -476,6 +532,14 @@ def audit_snapshot_meetings(
                 "high_confidence_missing_country",
                 meeting,
                 explicit_countries,
+                max_examples=max_examples_per_issue,
+            )
+
+        if _looks_like_admin_area_value(meeting.city):
+            audit.add_issue(
+                "city_admin_area",
+                meeting,
+                {"city": [str(meeting.city)]},
                 max_examples=max_examples_per_issue,
             )
 
@@ -589,9 +653,50 @@ def _city_for_candidate(
 ) -> str | None:
     if current_city and _looks_like_artifact_location_value(current_city):
         return None
-    if address_evidence.city and (not current_city or current_city == region):
+    if _looks_like_admin_area_value(current_city):
+        if address_evidence.city and not _looks_like_admin_area_value(address_evidence.city):
+            return address_evidence.city
+        return None
+    if (
+        address_evidence.city
+        and not current_city
+        and not _looks_like_admin_area_value(address_evidence.city)
+    ):
         return address_evidence.city
     return current_city
+
+
+def _region_from_city_value(value: object, country: object) -> str | None:
+    if not isinstance(value, str) or not isinstance(country, str):
+        return None
+    normalized_country = normalize_country_name(country)
+    if not normalized_country:
+        return None
+    return _canonical_admin_region(value, normalized_country)
+
+
+def _generic_admin_region_from_city_value(value: object) -> str | None:
+    if not isinstance(value, str) or not _looks_like_admin_area_value(value):
+        return None
+    cleaned = value.strip()
+    cleaned = re.sub(r"^co\.?\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^county\s+", "", cleaned, flags=re.IGNORECASE)
+    return cleaned or None
+
+
+def _looks_like_admin_area_value(value: str | None) -> bool:
+    if not value:
+        return False
+    cleaned = value.strip()
+    if cleaned.casefold().startswith("all "):
+        return normalize_country_name(cleaned[4:]) is not None
+    return bool(
+        re.search(
+            r"^(?:co\.?\s+|county\s+)|\b(?:county|municipality|province|district|region)\b",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _occurrences_for_location(
@@ -686,7 +791,6 @@ def _postal_code_from_address_parts(
     parts: list[str],
     country: str | None,
 ) -> tuple[str | None, int | None]:
-    text = ", ".join(parts)
     country_order = [country] if country else []
     for candidate_country in ("United States", "Canada", "Australia", "United Kingdom", "Ireland"):
         if candidate_country not in country_order:
@@ -914,6 +1018,8 @@ def _city_before_region_token(part: str, region: str | None) -> str | None:
         if not match:
             continue
         city = part[: match.start()].strip(" ,")
+        if city.casefold().strip(" .") in {"co", "county"}:
+            continue
         if city and not _looks_like_street_address(city):
             return city
     return None

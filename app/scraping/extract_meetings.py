@@ -2717,7 +2717,11 @@ def _payload_from_structured_text_block(lines: list[str]) -> dict[str, str]:
     if len(lines) > 3 and lines[3].lower() in {"online", "in-person", "in person", "hybrid"}:
         payload["attendance_option"] = lines[3]
     if len(lines) > 4 and not _is_placeholder_line(lines[4]):
-        payload["city"] = lines[4]
+        location_group = lines[4]
+        if _looks_like_region_group_line(location_group):
+            payload["region"] = location_group
+        else:
+            payload["city"] = location_group
 
     detail_lines = [line for line in lines[5:] if not _is_placeholder_line(line)]
     connection_lines: list[str] = []
@@ -2739,6 +2743,12 @@ def _payload_from_structured_text_block(lines: list[str]) -> dict[str, str]:
     if connection_lines:
         payload["phone_join_info"] = " ".join(connection_lines)
     return payload
+
+
+def _looks_like_region_group_line(line: str) -> bool:
+    return bool(
+        re.match(r"^(?:co\.?\s+|county\s+|all\s+\w+\b)", line.strip(), flags=re.IGNORECASE)
+    )
 
 
 def _day_section_lines(container: Tag) -> list[str]:
