@@ -202,6 +202,71 @@ def test_build_snapshot_moves_irish_county_city_value_to_region() -> None:
     assert meeting.country_code == "IE"
 
 
+def test_build_snapshot_removes_accessibility_text_from_city() -> None:
+    snapshot = build_snapshot(
+        [
+            candidate(
+                fellowship="ca",
+                source_id="ca-ireland",
+                name="C.A. Oz House",
+                address_line1="Room 3, St. Augustine Street",
+                city="Not wheelchair accessible.",
+                region="Galway",
+                country="Ireland",
+                occurrences=[occurrence("Europe/Dublin")],
+            )
+        ]
+    )
+
+    meeting = snapshot.meetings[0]
+
+    assert meeting.city is None
+    assert meeting.region == "Galway"
+
+
+def test_build_snapshot_infers_oklahoma_timezone_from_zip() -> None:
+    snapshot = build_snapshot(
+        [
+            candidate(
+                fellowship="na",
+                source_id="na-ok",
+                name="This Is It Group",
+                address_line1=None,
+                city="Ponca City",
+                postal_code="74601",
+                country="United States",
+                occurrences=[occurrence("UTC")],
+            )
+        ]
+    )
+
+    meeting = snapshot.meetings[0]
+
+    assert meeting.region == "Oklahoma"
+    assert meeting.region_code == "OK"
+    assert meeting.occurrences[0].timezone == "America/Chicago"
+
+
+def test_audit_snapshot_quality_ignores_online_cross_timezone_country_labels() -> None:
+    meeting = SnapshotMeeting(
+        fellowship="na",
+        source_id="na-online",
+        source_record_id="online",
+        source_url="https://example.org/meetings",
+        name="Online Australian Meeting",
+        meeting_type="online",
+        country="Australia",
+        country_code="AU",
+        is_approximate_location=False,
+        formats=[],
+        occurrences=[MeetingOccurrence(day_of_week=1, start_time_local="19:30", timezone="UTC")],
+    )
+
+    audit = audit_snapshot_meetings([meeting])
+
+    assert not audit.issue_counts
+
+
 def test_build_snapshot_preserves_irish_cities_that_share_county_names() -> None:
     snapshot = build_snapshot(
         [

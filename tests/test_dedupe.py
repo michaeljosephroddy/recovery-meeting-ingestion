@@ -125,6 +125,36 @@ def test_consolidate_duplicate_candidates_merges_aa_australia_source_overlap() -
     assert result.candidates[0].source_id == "aa-08512eb5f89d"
 
 
+def test_consolidate_duplicate_candidates_prefers_most_common_display_name() -> None:
+    typo = _candidate(
+        fellowship="na",
+        source_id="na-2d0fad4641a8",
+        source_record_id="314",
+        name="DIngle Online and Physically Open",
+        address_line1="off Green Street, Dingle",
+        country="Ireland",
+        day_of_week=5,
+        start_time_local="20:30",
+    )
+    corrected = _candidate(
+        fellowship="na",
+        source_id="na-565ff8e141b7",
+        source_record_id="893",
+        name="Dingle Online and Physically Open",
+        address_line1="off Green St, Dingle",
+        country="Ireland",
+        day_of_week=2,
+        start_time_local="19:30",
+    )
+    duplicate_corrected = corrected.model_copy(
+        update={"source_id": "na-e9c7fc6d1f46", "source_record_id": "5"}
+    )
+
+    result = consolidate_duplicate_candidates([typo, corrected, duplicate_corrected])
+
+    assert result.candidates[0].name == "Dingle Online and Physically Open"
+
+
 def _candidate(
     *,
     fellowship: str,

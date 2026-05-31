@@ -412,7 +412,7 @@ def normalize_candidate_location(
     elif not declared_country and source_country:
         update["country"] = source_country
 
-    next_country = update.get("country", declared_country)
+    next_country = _optional_str(update.get("country", declared_country))
     if next_country:
         for field_name in ("address_line1", "address_line2", "city", "region"):
             normalized_value = _strip_trailing_country_segment(
@@ -421,18 +421,18 @@ def normalize_candidate_location(
             )
             if normalized_value != getattr(candidate, field_name):
                 update[field_name] = normalized_value
-        current_region = update.get("region", candidate.region)
+        current_region = _optional_str(update.get("region", candidate.region))
         normalized_region = _drop_redundant_country_region(current_region, next_country)
         if normalized_region != current_region:
             update["region"] = normalized_region
-        current_region = update.get("region", candidate.region)
+        current_region = _optional_str(update.get("region", candidate.region))
         next_region = _region_for_country(
             current_region,
             next_country,
             address_evidence=address_evidence,
             source_region=source_region,
         )
-        current_city = update.get("city", candidate.city)
+        current_city = _optional_str(update.get("city", candidate.city))
         city_region = None
         if _looks_like_admin_area_value(current_city if isinstance(current_city, str) else None):
             city_region = _region_from_city_value(current_city, next_country)
@@ -443,28 +443,40 @@ def normalize_candidate_location(
         if next_region != current_region:
             update["region"] = next_region
 
-    current_postal_code = update.get("postal_code", candidate.postal_code)
+    current_postal_code = _optional_str(update.get("postal_code", candidate.postal_code))
     if not current_postal_code and address_evidence.postal_code:
         update["postal_code"] = address_evidence.postal_code
 
-    current_city = update.get("city", candidate.city)
+    next_country = _optional_str(update.get("country", candidate.country))
+    current_region = _optional_str(update.get("region", candidate.region))
+    current_postal_code = _optional_str(update.get("postal_code", candidate.postal_code))
+    if (
+        next_country == "United States"
+        and not current_region
+        and isinstance(current_postal_code, str)
+    ):
+        zip_region = _us_region_from_zip(current_postal_code)
+        if zip_region:
+            update["region"] = zip_region
+
+    current_city = _optional_str(update.get("city", candidate.city))
     next_city = _city_for_candidate(
         current_city,
         address_evidence=address_evidence,
-        region=update.get("region", candidate.region),
+        region=_optional_str(update.get("region", candidate.region)),
     )
     if next_city != current_city:
         update["city"] = next_city
 
-    current_address_line1 = update.get("address_line1", candidate.address_line1)
+    current_address_line1 = _optional_str(update.get("address_line1", candidate.address_line1))
     if (
         address_evidence.street_address_line1
         and address_evidence.street_address_line1 != current_address_line1
     ):
         update["address_line1"] = address_evidence.street_address_line1
 
-    next_country = update.get("country", candidate.country)
-    next_region = update.get("region", candidate.region)
+    next_country = _optional_str(update.get("country", candidate.country))
+    next_region = _optional_str(update.get("region", candidate.region))
     if isinstance(next_country, str):
         next_country_code = country_code_for(next_country)
         if next_country_code != candidate.country_code:
@@ -576,6 +588,10 @@ def _explicit_location_countries(
     if IE_EIRCODE_RE.search(text) and not has_us_state_zip:
         countries.setdefault("Ireland", []).append("eircode")
     return countries
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _country_segments(meeting: CanonicalMeetingCandidate | SnapshotMeeting) -> list[str]:
@@ -730,10 +746,29 @@ def _timezone_matches_country(timezone: str, country: str) -> bool:
 def _looks_like_artifact_location_value(value: str) -> bool:
     cleaned = value.strip().casefold()
     return (
-        cleaned in {"are listed here:", "secondary menu", "email"}
+        cleaned
+        in {
+            "are listed here:",
+            "secondary menu",
+            "email",
+            "not wheelchair accessible",
+            "not wheelchair accessible.",
+            "wheelchair accessible",
+            "wheelchair accessible.",
+        }
         or "@" in cleaned
         or cleaned in {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
     )
+
+
+def _us_region_from_zip(value: str) -> str | None:
+    match = US_ZIP_RE.search(value)
+    if not match:
+        return None
+    zip_code = int(match.group(0)[:5])
+    if 73000 <= zip_code <= 73199 or 73400 <= zip_code <= 74199 or 74300 <= zip_code <= 74999:
+        return "Oklahoma"
+    return None
 
 
 def _address_location_evidence(
@@ -1071,6 +1106,8 @@ def _timezone_country_mismatches(
     declared_country: str | None,
 ) -> list[str]:
     if not declared_country:
+        return []
+    if meeting.meeting_type == "online":
         return []
     expected_prefixes = TIMEZONE_PREFIXES_BY_COUNTRY.get(declared_country)
     if not expected_prefixes:

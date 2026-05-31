@@ -21,6 +21,7 @@ The observable outcome is a new snapshot whose fellowship counts are materially 
 - [x] (2026-05-31T20:39+01:00) Added duplicate quality gates to `export-snapshot` and removed the broad candidate-loading exception handler that wrote empty snapshots.
 - [x] (2026-05-31T20:41+01:00) Added targeted regression tests for NA Dingle, NA Portlaoise, CA Oz House Galway, AA Australia overlap, and CLI export safety.
 - [x] (2026-05-31T20:51+01:00) Exported, audited, and dry-run imported the replacement snapshot with `--allow-large-drop`; no committed downstream import was run.
+- [x] (2026-05-31T21:21+01:00) Cleaned the remaining display/timezone audit issues, regenerated a zero-issue snapshot, and committed the cleanup import into the SoberSpace app database.
 
 ## Surprises & Discoveries
 
@@ -42,6 +43,8 @@ The observable outcome is a new snapshot whose fellowship counts are materially 
     Evidence: Preferring geocoded keys over text keys left Dingle and Portlaoise split because one Dingle row had no coordinates and the Portlaoise coordinates differed by 0.0001 degrees. The final implementation prefers normalized address text and only falls back to rounded coordinates when no textual place key exists.
 - Observation: Full-project ruff and mypy still expose unrelated pre-existing debt.
     Evidence: Changed files pass ruff, and `app/normalize/dedupe.py` passes mypy. Full-project ruff reports older long lines in `app/review/flags.py` and `app/scraping/ca_source_specific.py`; full-project mypy reports existing errors in `app/normalize/location_quality.py` and `app/scraping/ca_source_specific.py`.
+- Observation: The remaining display/timezone cleanup was small and did not change active meeting or occurrence counts.
+    Evidence: The cleanup snapshot kept `active_meetings: 91416` and `Occurrences written: 144752`, while the snapshot audit changed from 5 `timezone_country_mismatch` findings to no issues.
 
 ## Decision Log
 
@@ -120,10 +123,48 @@ Representative active app rows now have merged occurrences:
     DIngle Online and Physically Open: Tuesday at 19:30 and Friday at 20:30
     Step To Freedom Group Portlaoise: Monday at 20:00 and Saturday at 19:00
 
+Follow-up cleanup import:
+
+    Snapshot path: snapshots/meetings-2026-05-31T201343Z.json
+    Snapshot SHA-256: a210ae7ccf07e2bc0d1c9142d3e9b70f235c1dae51fba2b75e5a8d5b2c78e889
+    Import run: 3b7ba1f2-272c-4159-b6f3-ef5834bb7267
+    Meetings seen: 91416
+    Meetings upserted: 91416
+    Occurrences written: 144752
+    Marked stale: 90211
+    Marked inactive: 23519
+
+The final snapshot audit reports no issues:
+
+    duplicate_metrics:
+    - original_count: 91416
+    - consolidated_count: 91416
+    - removed_count: 0
+    - exact_occurrence_duplicate_groups_by_fellowship: none
+    - semantic_duplicate_groups_by_fellowship: none
+    - removed_by_fellowship: none
+    country_aliases:
+    - none
+    issue_counts:
+    - none
+
+Final app database active state after the cleanup import:
+
+    aa: 61113
+    ca: 2119
+    na: 28184
+    active occurrences: 144752
+
+Final representative active app rows:
+
+    C.A. Oz House: city is empty, region is Galway, Monday through Friday at 15:00
+    Dingle Online and Physically Open: corrected casing, Tuesday at 19:30 and Friday at 20:30
+    This Is It Group in Ponca City: region Oklahoma, region_code OK, Thursday at 17:00 America/Chicago
+
 Validation:
 
     .venv/bin/pytest -q
-    result: 270 passed, 14 skipped
+    result: 274 passed, 14 skipped
 
     git diff --check
     result: passed
@@ -132,6 +173,9 @@ Validation:
     result: passed
 
     .venv/bin/mypy app/normalize/dedupe.py
+    result: passed
+
+    .venv/bin/mypy app/normalize/dedupe.py app/normalize/location_quality.py
     result: passed
 
 The SoberSpace import is committed in the app database.
@@ -320,3 +364,5 @@ In `app/cli.py`, `export_snapshot` should call the result-producing builder, pri
 Plan revision note: Created on 2026-05-31 after investigation confirmed duplicate pollution is caused by ingestion/export row shaping rather than frontend rendering.
 
 Plan revision note: Updated on 2026-05-31 after implementing export-time semantic consolidation, quality gates, regression tests, snapshot export, snapshot audit, and downstream importer dry-run validation.
+
+Plan revision note: Updated on 2026-05-31 after cleaning the remaining display/timezone audit issues and committing the final zero-issue snapshot import.

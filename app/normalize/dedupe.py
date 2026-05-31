@@ -127,6 +127,10 @@ def consolidate_duplicate_candidates(
         primary = _primary_candidate(group)
         merged = primary.model_copy(
             update={
+                "name": _best_display_text(
+                    [candidate.name for candidate in group],
+                    fallback=primary.name,
+                ),
                 "formats": _merge_formats(group),
                 "occurrences": _merge_occurrences(group),
                 "last_verified_at": _latest_last_verified_at(group),
@@ -325,6 +329,32 @@ def _merge_formats(candidates: list[CanonicalMeetingCandidate]) -> list[str]:
             if (normalized := value.strip())
         },
         key=str.casefold,
+    )
+
+
+def _best_display_text(values: list[str | None], *, fallback: str) -> str:
+    candidates = [value.strip() for value in values if value and value.strip()]
+    if not candidates:
+        return fallback
+    counts = Counter(candidates)
+    return sorted(
+        counts,
+        key=lambda value: (
+            -counts[value],
+            _odd_capitalization_count(value),
+            len(value),
+            value.casefold(),
+        ),
+    )[0]
+
+
+def _odd_capitalization_count(value: str) -> int:
+    return sum(
+        1
+        for index, character in enumerate(value[1:], start=1)
+        if character.isupper()
+        and value[index - 1].islower()
+        and (index + 1 >= len(value) or value[index + 1].islower())
     )
 
 
