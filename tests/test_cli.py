@@ -22,6 +22,7 @@ from app.cli import (
 )
 from app.config import Settings
 from app.ingest import IngestResult
+from app.normalize.canonical import CanonicalMeetingCandidate, MeetingOccurrence
 from app.scraping.models import CrawlSettings, ExtractedMeeting, ScrapedPage, ScrapeSourceResult
 from app.scraping.service import ScrapeResult
 from app.sources.registry import AdapterType, Source, SourceType
@@ -395,6 +396,97 @@ async def test_scrape_sources_respects_concurrency(monkeypatch, tmp_path) -> Non
     )
 
     assert max_seen == 2
+
+
+def test_export_snapshot_db_failure_does_not_write_empty_snapshot(monkeypatch, tmp_path) -> None:
+    def broken_connect(settings):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr("app.cli.connect", broken_connect)
+    monkeypatch.setattr(
+        "app.cli.get_settings",
+        lambda: Settings(snapshot_output_dir=tmp_path),
+    )
+
+    result = CliRunner().invoke(app, ["export-snapshot", "--no-dry-run"])
+
+    assert result.exit_code != 0
+    assert not (tmp_path / "latest.json").exists()
+
+
+def test_export_snapshot_dry_run_prints_duplicate_metrics(monkeypatch, tmp_path) -> None:
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakeCanonicalRepository:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def list_active_candidates_for_snapshot(self):
+            return [
+                CanonicalMeetingCandidate(
+                    fellowship="ca",
+                    source_id="ca-23bc07bc85b3",
+                    source_record_id="monday",
+                    source_url="https://www.caireland.live/meeting-schedule",
+                    name="C.A. Oz House",
+                    meeting_type="in_person",
+                    address_line1="Room 3, St. Augustine Street",
+                    country="Ireland",
+                    occurrences=[
+                        MeetingOccurrence(
+                            day_of_week=1,
+                            start_time_local="15:00",
+                            timezone="Europe/Dublin",
+                        )
+                    ],
+                ),
+                CanonicalMeetingCandidate(
+                    fellowship="ca",
+                    source_id="ca-23bc07bc85b3",
+                    source_record_id="tuesday",
+                    source_url="https://www.caireland.live/meeting-schedule",
+                    name="C.A. Oz House",
+                    meeting_type="in_person",
+                    address_line1="Room 3, St Augustine Street",
+                    city="Not wheelchair accessible",
+                    country="Ireland",
+                    occurrences=[
+                        MeetingOccurrence(
+                            day_of_week=2,
+                            start_time_local="15:00",
+                            timezone="Europe/Dublin",
+                        )
+                    ],
+                ),
+            ]
+
+    class FakeReviewRepository:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def count_open_error_flags(self):
+            return 0
+
+    monkeypatch.setattr("app.cli.connect", lambda settings: FakeConnection())
+    monkeypatch.setattr("app.cli.CanonicalMeetingRepository", FakeCanonicalRepository)
+    monkeypatch.setattr("app.cli.ReviewFlagRepository", FakeReviewRepository)
+    monkeypatch.setattr(
+        "app.cli.get_settings",
+        lambda: Settings(snapshot_output_dir=tmp_path),
+    )
+
+    result = CliRunner().invoke(app, ["export-snapshot"])
+
+    assert result.exit_code == 0
+    assert "source_meetings: 2" in result.output
+    assert "active_meetings: 1" in result.output
+    assert "removed_count: 1" in result.output
+    assert not (tmp_path / "latest.json").exists()
 
 
 def test_persist_failed_scrape_does_not_replace_meetings_or_flags(monkeypatch) -> None:

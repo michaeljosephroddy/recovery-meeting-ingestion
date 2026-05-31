@@ -1,15 +1,28 @@
 import json
 import shutil
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from app.normalize.canonical import CanonicalMeetingCandidate, Snapshot, SnapshotMeeting
+from app.normalize.dedupe import ConsolidationResult, consolidate_duplicate_candidates
 from app.normalize.location_quality import normalize_candidate_location
 
 
+@dataclass(frozen=True)
+class SnapshotBuildResult:
+    snapshot: Snapshot
+    consolidation: ConsolidationResult
+
+
 def build_snapshot(candidates: list[CanonicalMeetingCandidate]) -> Snapshot:
+    return build_snapshot_with_quality(candidates).snapshot
+
+
+def build_snapshot_with_quality(candidates: list[CanonicalMeetingCandidate]) -> SnapshotBuildResult:
     normalized_candidates = [normalize_candidate_location(candidate) for candidate in candidates]
-    return Snapshot(
+    consolidation = consolidate_duplicate_candidates(normalized_candidates)
+    snapshot = Snapshot(
         generated_at=datetime.now(UTC),
         meetings=[
             SnapshotMeeting(
@@ -39,9 +52,10 @@ def build_snapshot(candidates: list[CanonicalMeetingCandidate]) -> Snapshot:
                 occurrences=candidate.occurrences,
                 last_verified_at=candidate.last_verified_at,
             )
-            for candidate in normalized_candidates
+            for candidate in consolidation.candidates
         ],
     )
+    return SnapshotBuildResult(snapshot=snapshot, consolidation=consolidation)
 
 
 def write_snapshot(snapshot: Snapshot, output_dir: Path) -> Path:

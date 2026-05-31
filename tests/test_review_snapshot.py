@@ -249,3 +249,53 @@ def test_snapshot_normalizes_location_country_before_export() -> None:
     assert snapshot.meetings[0].country == "United Kingdom"
     assert snapshot.meetings[0].address_line1 == "London"
     assert snapshot.meetings[0].region == "Chelsea London"
+
+
+def test_snapshot_consolidates_na_dingle_across_overlapping_sources() -> None:
+    candidates = [
+        CanonicalMeetingCandidate(
+            fellowship="na",
+            source_id="na-2d0fad4641a8",
+            source_record_id="5",
+            source_url="https://www.na-ireland.org/na-meetings/north/",
+            name="Dingle Online and Physically Open",
+            meeting_type="hybrid",
+            venue_name="Temporary venue, in a tiny extension on the left side of the church",
+            address_line1="off Green St, Dingle, Munster",
+            country="Ireland",
+            occurrences=[
+                MeetingOccurrence(
+                    day_of_week=2,
+                    start_time_local="19:30",
+                    timezone="Europe/Dublin",
+                )
+            ],
+        ),
+        CanonicalMeetingCandidate(
+            fellowship="na",
+            source_id="na-565ff8e141b7",
+            source_record_id="314",
+            source_url="https://www.na-ireland.org/na-meetings/west/",
+            name="Dingle Online and Physically Open",
+            meeting_type="hybrid",
+            venue_name="Temporary venue, in a tiny extension on the left side of the church",
+            address_line1="off Green Street, Dingle",
+            country="Ireland",
+            occurrences=[
+                MeetingOccurrence(
+                    day_of_week=5,
+                    start_time_local="20:30",
+                    timezone="Europe/Dublin",
+                )
+            ],
+        ),
+    ]
+
+    snapshot = build_snapshot(candidates)
+
+    assert len(snapshot.meetings) == 1
+    assert snapshot.meetings[0].source_id == "na-2d0fad4641a8"
+    assert [
+        (occurrence.day_of_week, str(occurrence.start_time_local))
+        for occurrence in snapshot.meetings[0].occurrences
+    ] == [(2, "19:30:00"), (5, "20:30:00")]

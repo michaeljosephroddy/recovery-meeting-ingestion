@@ -10,12 +10,13 @@ from psycopg.rows import dict_row
 from rich.console import Console
 
 from app.config import Settings, get_settings
-from app.export.snapshot import build_snapshot
+from app.export.snapshot import build_snapshot_with_quality
 from app.export.snapshot import write_snapshot as write_snapshot_file
 from app.ingest import IngestResult
 from app.ingest import ingest_source as run_ingest_source
 from app.logging import configure_logging
-from app.normalize.canonical import Snapshot
+from app.normalize.canonical import CanonicalMeetingCandidate, Snapshot, SnapshotMeeting
+from app.normalize.dedupe import DuplicateMetrics, consolidate_duplicate_candidates
 from app.normalize.location_quality import audit_snapshot_meetings
 from app.review.flags import flag_source_drop
 from app.scraping.artifact_import import (
@@ -729,22 +730,65 @@ def classify_sources(
 
 
 @app.command("export-snapshot")
-def export_snapshot(dry_run: bool = True) -> None:
+def export_snapshot(
+    dry_run: bool = True,
+    max_residual_duplicate_rate: Annotated[
+        float,
+        typer.Option(
+            help=(
+                "Maximum allowed semantic duplicate rate after export-time consolidation. "
+                "Set higher only after reviewing printed duplicate examples."
+            ),
+        ),
+    ] = 0.005,
+    min_meetings: Annotated[
+        int,
+        typer.Option(help="Minimum consolidated meeting count required before writing a snapshot."),
+    ] = 1,
+) -> None:
     settings = get_settings()
-    try:
-        with connect(settings) as connection:
-            canonical_repository = CanonicalMeetingRepository(connection)
-            review_repository = ReviewFlagRepository(connection)
-            candidates = canonical_repository.list_active_candidates_for_snapshot()
-            blocked_by_review = review_repository.count_open_error_flags()
-    except Exception:
-        candidates = []
-        blocked_by_review = 0
-    snapshot = build_snapshot(candidates)
+    with connect(settings) as connection:
+        canonical_repository = CanonicalMeetingRepository(connection)
+        review_repository = ReviewFlagRepository(connection)
+        candidates = canonical_repository.list_active_candidates_for_snapshot()
+        blocked_by_review = review_repository.count_open_error_flags()
+    build_result = build_snapshot_with_quality(candidates)
+    snapshot = build_result.snapshot
+    consolidation = build_result.consolidation
+    residual = consolidate_duplicate_candidates(consolidation.candidates)
     console.print("Snapshot dry run" if dry_run else "Snapshot export")
+    console.print(f"source_meetings: {consolidation.metrics.original_count}")
     console.print(f"active_meetings: {len(snapshot.meetings)}")
     console.print("stale_meetings: 0")
     console.print(f"blocked_by_review: {blocked_by_review}")
+    _print_duplicate_metrics("duplicate_metrics", consolidation.metrics)
+    _print_duplicate_metrics("residual_duplicate_metrics", residual.metrics)
+    for example in consolidation.examples[:5]:
+        console.print(
+            "duplicate_example: "
+            f"fellowship={example.fellowship} removed={example.removed_count} "
+            f"name={example.name!r} sources={','.join(example.source_ids[:5])}"
+        )
+    residual_rate = (
+        residual.metrics.removed_count / residual.metrics.original_count
+        if residual.metrics.original_count
+        else 0.0
+    )
+    gate_errors = []
+    if len(snapshot.meetings) < min_meetings:
+        gate_errors.append(
+            f"consolidated meeting count {len(snapshot.meetings)} is below minimum {min_meetings}"
+        )
+    if residual_rate > max_residual_duplicate_rate:
+        gate_errors.append(
+            "residual duplicate rate "
+            f"{residual_rate:.4%} exceeds maximum {max_residual_duplicate_rate:.4%}"
+        )
+    if gate_errors:
+        for error in gate_errors:
+            console.print(f"quality_gate_error: {error}")
+        console.print("output: not written because snapshot quality gate failed")
+        raise typer.Exit(1)
     if dry_run:
         console.print("output: not written because --dry-run was set")
         return
@@ -779,17 +823,30 @@ def audit_snapshot_quality(
 ) -> None:
     snapshot = Snapshot.model_validate_json(snapshot_path.read_text(encoding="utf-8"))
     audit = audit_snapshot_meetings(snapshot.meetings, max_examples_per_issue=examples)
+    duplicate_audit = consolidate_duplicate_candidates(
+        [_candidate_from_snapshot_meeting(meeting) for meeting in snapshot.meetings],
+        max_examples=examples,
+    )
 
     console.print(f"snapshot: {snapshot_path}")
     console.print(f"total_meetings: {audit.total_meetings}")
+    _print_duplicate_metrics("duplicate_metrics", duplicate_audit.metrics)
+    for duplicate_example in duplicate_audit.examples:
+        console.print(
+            "duplicate_example: "
+            f"fellowship={duplicate_example.fellowship} "
+            f"removed={duplicate_example.removed_count} "
+            f"name={duplicate_example.name!r} "
+            f"sources={','.join(duplicate_example.source_ids[:5])}"
+        )
     _print_counter("country_aliases", audit.country_aliases, top_sources)
     _print_counter("issue_counts", audit.issue_counts, top_sources)
     _print_counter("issue_counts_by_fellowship", audit.issue_counts_by_fellowship, top_sources)
     _print_counter("issue_counts_by_source", audit.issue_counts_by_source, top_sources)
     for issue_code, issue_examples in sorted(audit.examples.items()):
         console.print(f"{issue_code}_examples:")
-        for example in issue_examples:
-            console.print(json.dumps(example.as_dict(), ensure_ascii=False, sort_keys=True))
+        for issue_example in issue_examples:
+            console.print(json.dumps(issue_example.as_dict(), ensure_ascii=False, sort_keys=True))
 
 
 def _print_counter(label: str, counter: Counter[str], limit: int) -> None:
@@ -799,6 +856,31 @@ def _print_counter(label: str, counter: Counter[str], limit: int) -> None:
         return
     for key, count in counter.most_common(limit):
         console.print(f"- {count} {key}")
+
+
+def _print_duplicate_metrics(label: str, metrics: DuplicateMetrics) -> None:
+    console.print(f"{label}:")
+    console.print(f"- original_count: {metrics.original_count}")
+    console.print(f"- consolidated_count: {metrics.consolidated_count}")
+    console.print(f"- removed_count: {metrics.removed_count}")
+    _print_metric_dict(
+        "- exact_occurrence_duplicate_groups_by_fellowship",
+        metrics.exact_occurrence_duplicate_groups_by_fellowship,
+    )
+    _print_metric_dict(
+        "- semantic_duplicate_groups_by_fellowship",
+        metrics.semantic_duplicate_groups_by_fellowship,
+    )
+    _print_metric_dict("- removed_by_fellowship", metrics.removed_by_fellowship)
+
+
+def _print_metric_dict(label: str, values: dict[str, int]) -> None:
+    rendered = ", ".join(f"{key}={values[key]}" for key in sorted(values))
+    console.print(f"{label}: {rendered or 'none'}")
+
+
+def _candidate_from_snapshot_meeting(meeting: SnapshotMeeting) -> CanonicalMeetingCandidate:
+    return CanonicalMeetingCandidate(**meeting.model_dump())
 
 
 @app.command("cleanup-timezones")
