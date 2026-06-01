@@ -28,7 +28,10 @@ def flags_for_candidate(candidate: CanonicalMeetingCandidate) -> list[ReviewFlag
             ReviewFlag(
                 code="location_text_artifact",
                 severity="error",
-                message="candidate appears to be navigation, schedule, or contact text rather than a meeting",
+                message=(
+                    "candidate appears to be navigation, schedule, or contact text "
+                    "rather than a meeting"
+                ),
                 source_record_id=candidate.source_record_id,
             )
         )

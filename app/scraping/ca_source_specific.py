@@ -1,11 +1,11 @@
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from urllib.parse import urljoin
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from app.adapters.base import RawMeeting
 from app.sources.registry import Source
@@ -95,7 +95,7 @@ def _parser(source_id: str) -> Callable[
 @_parser("ca-63a0c6bbe7d2")
 def raw_records_from_denmark_html(source: Source, html: str, source_url: str) -> list[RawMeeting]:
     soup = BeautifulSoup(html, "html.parser")
-    records = []
+    records: list[RawMeeting] = []
     for row_index, row in enumerate(_table_rows(soup), start=1):
         if len(row) < 4 or row[0].casefold() == "dag":
             continue
@@ -104,7 +104,7 @@ def raw_records_from_denmark_html(source: Source, html: str, source_url: str) ->
         if not start:
             continue
         name = _quoted_name(name_text) or _clean_text(re.split(r"\bDørene\b", name_text)[0])
-        payload = {
+        payload: dict[str, object] = {
             "source_record_id": f"denmark-{row_index}",
             "name": name,
             "day": day,
@@ -163,14 +163,14 @@ def raw_records_from_maritimes_html(source: Source, html: str, source_url: str) 
         for anchor in soup.find_all("a", href=True)
         if _clean_text(anchor.get_text(" ", strip=True)).casefold() == "join now"
     ]
-    records = []
+    records: list[RawMeeting] = []
     join_index = 0
     for index, line in enumerate(lines[:-1]):
         day_time = _day_at_time(lines[index + 1])
         if day_time is None:
             continue
         day, time_text = day_time
-        payload = {
+        payload: dict[str, object] = {
             "source_record_id": f"maritimes-{len(records)}",
             "name": line,
             "day": day,
@@ -242,7 +242,7 @@ def raw_records_from_wisconsin_html(source: Source, html: str, source_url: str) 
         "Southeastern WI",
         "This website is neither endorsed",
     )
-    records = []
+    records: list[RawMeeting] = []
     current_day: str | None = None
     index = 0
     while index < len(lines):
@@ -284,7 +284,7 @@ def raw_records_from_oklahoma_html(source: Source, html: str, source_url: str) -
         "formats": "Discussion",
         "extraction": {"method": "ca_oklahoma_static_schedule", "confidence": 0.92},
     }
-    records = []
+    records: list[RawMeeting] = []
     for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]:
         records.append(
             _raw_record(
@@ -318,7 +318,7 @@ def raw_records_from_greece_html(source: Source, html: str, source_url: str) -> 
     text = "\n".join(_content_lines(BeautifulSoup(html, "html.parser")))
     zoom_links = re.findall(r"https://us\d+web\.zoom\.us/j/[^\s]+", text)
     primary_zoom = zoom_links[0] if zoom_links else None
-    records = []
+    records: list[RawMeeting] = []
     for greek_day, day in _GREEK_DAYS.items():
         for match in re.finditer(rf"{greek_day}\s+(\d{{1,2}}:\d{{2}})", text):
             payload = {
@@ -341,7 +341,7 @@ def raw_records_from_greece_html(source: Source, html: str, source_url: str) -> 
 @_parser("ca-e2f77889edc7")
 def raw_records_from_russia_html(source: Source, html: str, source_url: str) -> list[RawMeeting]:
     lines = _content_lines(BeautifulSoup(html, "html.parser"))
-    records = []
+    records: list[RawMeeting] = []
     for index, line in enumerate(lines):
         if "КАЖДЫЙ ДЕНЬ" not in line.upper():
             continue
@@ -380,7 +380,7 @@ def _records_from_day_blocks(
     city: str,
     timezone: str,
 ) -> list[RawMeeting]:
-    records = []
+    records: list[RawMeeting] = []
     current_day: str | None = None
     index = 0
     while index < len(lines):
@@ -426,7 +426,7 @@ def _records_from_time_blocks(
     city: str,
     timezone: str,
 ) -> list[RawMeeting]:
-    records = []
+    records: list[RawMeeting] = []
     current_day: str | None = None
     index = 0
     while index < len(lines):
@@ -469,7 +469,7 @@ def _records_from_name_before_time_blocks(
     city: str,
     timezone: str,
 ) -> list[RawMeeting]:
-    records = []
+    records: list[RawMeeting] = []
     current_day: str | None = None
     index = 0
     while index < len(lines):
@@ -576,9 +576,14 @@ def _quebec_payload(
     formats = flattened[0] if len(flattened[0]) <= 20 else None
     details = flattened[1:] if formats else flattened
     online_url = next((item for item in details if item.startswith("http")), None)
-    zoom = " ".join(item for item in details if "zoom" in item.casefold() or item.startswith("http"))
+    zoom = " ".join(
+        item for item in details if "zoom" in item.casefold() or item.startswith("http")
+    )
     address = next((item for item in details if _looks_like_address(item)), None)
-    city = next((item for item in details if re.search(r"\b[A-Z]\d[A-Z]\s*\d[A-Z]\d\b", item)), None)
+    city = next(
+        (item for item in details if re.search(r"\b[A-Z]\d[A-Z]\s*\d[A-Z]\d\b", item)),
+        None,
+    )
     payload: dict[str, object] = {
         "source_record_id": source_record_id,
         "name": name,
@@ -602,8 +607,8 @@ def _quebec_payload(
     return payload
 
 
-def _table_rows(soup: BeautifulSoup) -> list[list[str]]:
-    rows = []
+def _table_rows(soup: BeautifulSoup | Tag) -> list[list[str]]:
+    rows: list[list[str]] = []
     for row in soup.find_all("tr"):
         cells = [_clean_text(cell.get_text(" ", strip=True)) for cell in row.find_all(["th", "td"])]
         if any(cells):
@@ -636,7 +641,7 @@ def _consume_until_next(
     start: int,
     boundary: Callable[[str], bool],
 ) -> tuple[list[str], int]:
-    block = []
+    block: list[str] = []
     index = start
     while index < len(lines) and not boundary(lines[index]):
         block.append(lines[index])
@@ -694,7 +699,7 @@ def _day_at_time(value: str) -> tuple[str, str] | None:
 
 
 def _address_lines(block: list[str]) -> list[str]:
-    lines = []
+    lines: list[str] = []
     for line in block:
         lowered = line.casefold()
         if (
@@ -780,7 +785,7 @@ def _clean_name(value: str) -> str:
 
 
 def _format_notes(value: str) -> str:
-    notes = []
+    notes: list[str] = []
     for marker in ["Open", "Discussion", "Big Book", "Speaker", "Meditation", "12 & 12", "Closed"]:
         if marker.casefold() in value.casefold():
             notes.append(marker)
@@ -791,21 +796,29 @@ def _clean_text(value: object) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").replace("\ufeff", " ").split()).strip()
 
 
-def _raw_record(source: Source, source_url: str, payload: dict[str, object]) -> RawMeeting:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    source_record_id = str(payload.get("source_record_id") or hashlib.sha1(encoded).hexdigest()[:16])
+def _raw_record(source: Source, source_url: str, payload: Mapping[str, object]) -> RawMeeting:
+    payload_dict = dict(payload)
+    encoded = json.dumps(
+        payload_dict,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    source_record_id = str(
+        payload_dict.get("source_record_id") or hashlib.sha1(encoded).hexdigest()[:16]
+    )
     return RawMeeting(
         source_id=source.id,
         source_record_id=source_record_id,
         source_url=source_url,
-        payload=payload,
+        payload=payload_dict,
         content_hash=hashlib.sha256(encoded).hexdigest(),
     )
 
 
 def _dedupe_records(records: list[RawMeeting]) -> list[RawMeeting]:
-    deduped = []
-    seen = set()
+    deduped: list[RawMeeting] = []
+    seen: set[str] = set()
     for record in records:
         if record.source_record_id in seen:
             continue
